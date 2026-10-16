@@ -1,5 +1,6 @@
 import { apiUrl } from '../api-endpoint.ts'
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_VALUE } from '../client-version'
+import { describeFetchError, fetchFailure } from '../fetch-error.ts'
 import { readDeviceIdentity } from '../main/device-identity.ts'
 
 import {
@@ -121,13 +122,13 @@ export async function postChatAttempt(
         'post_failed',
         { streamId, sessionId },
         {
-          error: fetchErr instanceof Error ? fetchErr.message : String(fetchErr),
+          error: describeFetchError(fetchErr),
           aborted: ctx.signal.aborted,
           elapsed_ms: Date.now() - attemptStartedAt,
         },
         'warn',
       )
-      throw fetchErr
+      throw fetchFailure(fetchErr)
     }
     state.firstByteTimeouts += 1
     traceStream(

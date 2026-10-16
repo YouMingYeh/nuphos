@@ -5,6 +5,7 @@ import yaml from 'js-yaml'
 import { apiUrl } from '../api-endpoint.ts'
 import { CLI_CONFIG_PATH } from '../cli-config-path.ts'
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_VALUE } from '../client-version'
+import { describeFetchError } from '../fetch-error.ts'
 
 import { buildAtlasError } from './error.ts'
 
@@ -26,10 +27,7 @@ export async function readToken(): Promise<string | null> {
 }
 
 export function unwrapFetchError(e: unknown, route: string): Error {
-  const cause = (e as { cause?: { code?: string; message?: string } }).cause
-  const detail = cause?.message ?? cause?.code ?? (e as Error).message ?? String(e)
-
-  return new Error(`Nuphos backend ${route}: ${detail}`)
+  return new Error(`Nuphos backend ${route}: ${describeFetchError(e)}`)
 }
 
 // Default per-request timeout. Multi-region sweeps (e.g. Aliyun ECS/SWAS across

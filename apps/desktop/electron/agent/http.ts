@@ -5,6 +5,7 @@ import yaml from 'js-yaml'
 import { apiUrl } from '../api-endpoint.ts'
 import { buildAtlasError } from '../atlas/error.ts'
 import { CLI_CONFIG_PATH } from '../cli-config-path.ts'
+import { fetchFailure } from '../fetch-error.ts'
 
 export function teamIdFromUrl(url?: string): string | undefined {
   if (!url) return undefined
@@ -88,7 +89,13 @@ export async function callJson<T>(
     headers['content-type'] = 'application/json'
     init.body = JSON.stringify(body)
   }
-  const res = await fetch(`${apiUrl()}${route}`, init)
+  let res: Response
+
+  try {
+    res = await fetch(`${apiUrl()}${route}`, init)
+  } catch (error) {
+    throw fetchFailure(error)
+  }
 
   if (!res.ok) {
     let message = `HTTP ${String(res.status)}`
