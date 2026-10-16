@@ -15,6 +15,8 @@ import { LOCAL_AGENT_PROVIDERS } from '@/lib/agent/devices/local-runtime/protoco
 import { isActiveTeamMember } from '@/lib/agent/devices/store'
 import { AppError } from '@/lib/errors'
 
+import { runtimeLabel } from './runtime-provider'
+
 import type { RuntimeModelCatalog } from './runtime-models'
 import type { PreviewRuntimeStatus } from './runtime-status'
 import type { TeamRuntimeEndpoint } from './team-openab-runtime'
@@ -88,11 +90,6 @@ export function reportedLocalAgent(
     : status?.agents[ref.provider]
 }
 
-const PROVIDER_LABEL: Record<LocalAgentProvider, string> = {
-  'claude-code': 'Claude Code',
-  codex: 'Codex',
-}
-
 /** The user's own computers whose local agent is connected right now, in a team they belong to. */
 export async function listOwnLocalRuntimes(
   teamId: string,
@@ -126,7 +123,7 @@ export async function listOwnLocalRuntimes(
           return {
             id,
             provider,
-            label: `${label ?? PROVIDER_LABEL[provider]} in ${device.label}`,
+            label: `${label ?? runtimeLabel(provider)} in ${device.label}`,
             status: 'active',
             kind: 'local',
             createdAt: device.createdAt.toISOString(),
@@ -211,7 +208,7 @@ export async function resolveLocalRuntimeEndpoint(
     throw new AppError(
       409,
       'runtime_login_required',
-      `Sign in to ${PROVIDER_LABEL[ref.provider]} on the computer running this agent before it can run conversations.`,
+      `Sign in to ${runtimeLabel(ref.provider)} on the computer running this agent before it can run conversations.`,
     )
 
   return {
@@ -220,7 +217,7 @@ export async function resolveLocalRuntimeEndpoint(
     runtimeId,
     external: true,
     local: { userId: ref.userId, deviceId: ref.deviceId },
-    ...(ref.provider === 'codex' ? { provider: 'codex' as const } : {}),
+    ...(ref.provider === 'claude-code' ? {} : { provider: ref.provider }),
     ...(presence.status?.backendUrl ? { backendUrl: presence.status.backendUrl } : {}),
   }
 }

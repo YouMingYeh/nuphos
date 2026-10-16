@@ -30,6 +30,8 @@ export class LocalRuntimeController {
   private readonly agents: Record<LocalAgentProvider, Agent> = {
     'claude-code': freshAgent(),
     codex: freshAgent(),
+    grok: freshAgent(),
+    opencode: freshAgent(),
   }
   private tunnel: RuntimeTunnel | undefined
   private readonly usage: ReturnType<typeof createUsageSampler>

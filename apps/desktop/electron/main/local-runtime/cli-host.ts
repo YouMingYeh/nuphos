@@ -48,7 +48,12 @@ if (!dataDir) {
   process.exit(1)
 }
 const clientVersion = `nuphos-cli/${process.env.NUPHOS_CLI_VERSION ?? 'dev'}`
-const NAMES: Record<LocalAgentProvider, string> = { 'claude-code': 'Claude Code', codex: 'Codex' }
+const NAMES: Record<LocalAgentProvider, string> = {
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  grok: 'Grok Build',
+  opencode: 'OpenCode',
+}
 
 function deviceIdentity(): DeviceIdentity {
   const file = path.join(dataDir, 'device-identity.json')
