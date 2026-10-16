@@ -1,15 +1,16 @@
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { accessSync, constants, realpathSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { claudeKeychainService } from './claude-keychain.ts'
 import { agentCliEnv } from './config.ts'
 
-export type LocalAgentProvider = 'claude-code' | 'codex'
+import type { LocalAgentProvider } from './config.ts'
 
-export const LOCAL_AGENT_PROVIDERS: readonly LocalAgentProvider[] = ['claude-code', 'codex']
+export { LOCAL_AGENT_PROVIDERS } from './config.ts'
+export type { LocalAgentProvider } from './config.ts'
 
 export type AgentCliStatus =
   | { installed: false }
@@ -29,7 +30,20 @@ export type AgentCliStatus =
 const PROBE_TIMEOUT_MS = 15_000
 const USAGE_TIMEOUT_MS = 10_000
 const MAX_USAGE_CHARS = 200_000
-const COMMAND: Record<LocalAgentProvider, string> = { 'claude-code': 'claude', codex: 'codex' }
+const COMMAND: Record<LocalAgentProvider, string> = {
+  'claude-code': 'claude',
+  codex: 'codex',
+  grok: 'grok',
+  opencode: 'opencode',
+}
+/**
+ * Grok Build and OpenCode have no status command: each signs in by writing this
+ * file under its home, as the cloud runtime checks too.
+ */
+export const CREDENTIAL_FILE: Partial<Record<LocalAgentProvider, string>> = {
+  grok: path.join('.grok', 'auth.json'),
+  opencode: path.join('.local', 'share', 'opencode', 'auth.json'),
+}
 
 function fallbackDirs(home: string): string[] {
   if (process.platform === 'win32') {
@@ -41,6 +55,9 @@ function fallbackDirs(home: string): string[] {
   return [
     path.join(home, '.local', 'bin'),
     path.join(home, '.claude', 'local'),
+    // Where the Grok Build and OpenCode installers put their CLIs.
+    path.join(home, '.grok', 'bin'),
+    path.join(home, '.opencode', 'bin'),
     '/opt/homebrew/bin',
     '/usr/local/bin',
     // The CLI bundled with the ChatGPT (Codex) desktop app, for users without a separate install.
@@ -127,6 +144,17 @@ export function parseCodexLoginStatus(
   return { loggedIn: null }
 }
 
+/** Signed in when the agent's credential file holds something; null when its home could not be made. */
+async function credentialLogin(
+  file: string,
+  agentHome: string | undefined,
+): Promise<{ loggedIn: boolean | null }> {
+  if (!agentHome) return { loggedIn: null }
+  const found = await stat(path.join(agentHome, file)).catch(() => null)
+
+  return { loggedIn: Boolean(found?.isFile() && found.size > 2) }
+}
+
 function versionOf(output: string): string | undefined {
   return output.split(/\s+/u).find((token) => /^\d+\.\d+\.\d+/u.test(token))
 }
@@ -170,6 +198,11 @@ async function claudeUsageRequest(
   // Match Claude's Keychain selection, including the terminal's unsuffixed default entry.
   // Claude keys the entry by account too; without it a stale entry of the same name can win.
   if (process.platform === 'darwin' && env.CLAUDE_CONFIG_DIR) {
+    const storageDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR
+    const suffix = storageDir
+      ? `-${createHash('sha256').update(storageDir.normalize('NFC')).digest('hex').slice(0, 8)}`
+      : ''
+
     try {
       credential = JSON.parse(
         await run(
@@ -179,7 +212,7 @@ async function claudeUsageRequest(
             '-a',
             os.userInfo().username,
             '-s',
-            claudeKeychainService(env),
+            `Claude Code-credentials${suffix}`,
             '-w',
           ],
           env,
@@ -210,7 +243,10 @@ function usageRequest(
 ): Promise<UsageRequest | null> {
   const home = env.HOME ?? env.USERPROFILE ?? os.homedir()
 
-  return provider === 'codex' ? codexUsageRequest(home, env) : claudeUsageRequest(home, env)
+  if (provider === 'codex') return codexUsageRequest(home, env)
+  if (provider === 'claude-code') return claudeUsageRequest(home, env)
+
+  return Promise.resolve(null)
 }
 
 /** Asks the provider what is left of this computer's own account. It runs here,
@@ -257,11 +293,14 @@ export async function probeAgentCli(
     : undefined
   const authArgs = provider === 'codex' ? ['login', 'status'] : ['auth', 'status', '--json']
   const parseAuth = provider === 'codex' ? parseCodexLoginStatus : parseClaudeAuthStatus
+  const credential = CREDENTIAL_FILE[provider]
   const [version, auth] = await Promise.all([
     run(file, ['--version'], env).then(versionOf, () => {}),
-    runtimeEnv
-      ? run(file, authArgs, runtimeEnv).then(parseAuth, () => ({ loggedIn: null }))
-      : Promise.resolve({ loggedIn: null }),
+    credential
+      ? credentialLogin(credential, agentHome)
+      : runtimeEnv
+        ? run(file, authArgs, runtimeEnv).then(parseAuth, () => ({ loggedIn: null }))
+        : Promise.resolve({ loggedIn: null }),
   ])
 
   // Usage is sampled on its own timer, never here: this probe gates the agent's

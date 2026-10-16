@@ -180,7 +180,7 @@ export function deleteDefaultLogin(
   userDir: string,
   env: NodeJS.ProcessEnv,
 ): void {
-  rmSync(path.join(userDir, provider === 'codex' ? 'codex-home' : 'claude-home'), {
+  rmSync(path.join(userDir, provider === 'claude-code' ? 'claude-home' : `${provider}-home`), {
     recursive: true,
     force: true,
   })
@@ -193,9 +193,27 @@ export function prepareAgentHome(
   workspace: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  return provider === 'codex'
-    ? prepareCodexHome(userDir, env)
-    : prepareClaudeHome(userDir, workspace)
+  if (provider === 'codex') return prepareCodexHome(userDir, env)
+  if (provider === 'claude-code') return prepareClaudeHome(userDir, workspace)
+
+  return prepareShimHome(provider, userDir)
+}
+
+/**
+ * The HOME Grok Build or OpenCode runs with for Nuphos, as /home/node is in the
+ * cloud runtime: it starts empty, so the owner's own login and config stay out,
+ * and the agent's Sign in writes its credential here.
+ */
+export function prepareShimHome(provider: LocalAgentProvider, userDir: string): string | undefined {
+  const home = path.join(userDir, `${provider}-home`)
+
+  try {
+    mkdirSync(home, { recursive: true, mode: 0o700 })
+
+    return home
+  } catch {
+    return undefined
+  }
 }
 
 /** New instances own their authentication; never link or import the host login. */
@@ -205,6 +223,7 @@ export function prepareIsolatedAgentHome(
   workspace: string,
 ): string | undefined {
   if (provider === 'claude-code') return prepareClaudeHome(userDir, workspace)
+  if (provider !== 'codex') return prepareShimHome(provider, userDir)
   const home = path.join(userDir, 'codex-home')
 
   try {

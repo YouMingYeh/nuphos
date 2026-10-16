@@ -40,6 +40,8 @@ export const PROVIDERS = {
     // --no-leader keeps tools in this process, so they run with this session's env
     // rather than in a leader shared by every conversation.
     command: ['grok', 'agent', '--no-leader', 'stdio'],
+    // Where the CLI is not on PATH, as on a computer that installed it elsewhere.
+    executable: 'GROK_EXECUTABLE',
     home: (runtimeHome) => ({
       GROK_HOME: join(runtimeHome, '.grok'),
       GROK_DISABLE_AUTOUPDATER: '1',
@@ -58,6 +60,7 @@ export const PROVIDERS = {
   },
   opencode: {
     command: ['opencode', 'acp'],
+    executable: 'OPENCODE_EXECUTABLE',
     home: () => ({ OPENCODE_DISABLE_AUTOUPDATE: '1' }),
     // OpenCode keeps its login (auth.json) and its sessions in XDG_DATA_HOME/opencode,
     // and provider settings such as Bedrock's region in XDG_CONFIG_HOME/opencode. Only
@@ -185,7 +188,8 @@ export function runShim({
 
   const start = (env) => {
     agent?.kill('SIGTERM')
-    const child = spawnAgent(spec.command, env)
+    const [command, ...args] = spec.command
+    const child = spawnAgent([(spec.executable && env[spec.executable]) || command, ...args], env)
     agent = child
     // The agent is the session: when it ends, so does this process.
     child.on('exit', (code) => {
