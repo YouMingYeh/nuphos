@@ -32,3 +32,13 @@ test('unsafe protocols and event handlers are still stripped', () => {
 
   assert.doesNotMatch(html, /javascript:|data:|onerror/)
 })
+
+test('bare paths in prose become file links, code and links are left to their renderers', () => {
+  const html = render(
+    '檔案在 /data/workspace/a.mp4。\n\n`/data/workspace/b.md` [c](https://x.dev/data/c)\n\n```\n/data/workspace/d.md\n```',
+  )
+
+  assert.match(html, /<a href="\/data\/workspace\/a\.mp4">\/data\/workspace\/a\.mp4<\/a>。/)
+  assert.doesNotMatch(html, /href="\/data\/workspace\/[bd]\.md"/)
+  assert.doesNotMatch(html, /href="\/data\/c"/)
+})

@@ -12,7 +12,7 @@ import { canManageTeamTriggers } from '../../../views/triggers/shared'
 import { Button } from '../../ui/button'
 import { Switch } from '../../ui/Switch'
 import { toast } from '../../ui/toast'
-import { ChatLink } from '../MessageResponse'
+import { ChatLink } from '../ChatLink'
 
 import { NextRuns, ScheduleEditor } from './TriggerCardBody'
 import { triggerCardInfo } from './triggerCards'

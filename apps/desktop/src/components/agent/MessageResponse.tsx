@@ -1,22 +1,18 @@
 import { cjk as cjkPlugin } from '@streamdown/cjk'
 import { createCodePlugin } from '@streamdown/code'
 import clsx from 'clsx'
-import { ExternalLink, Link2, PanelRight } from 'lucide-react'
-import { isValidElement, memo, useContext, useMemo, useState } from 'react'
+import { cloneElement, isValidElement, memo, useMemo } from 'react'
 import { Streamdown } from 'streamdown'
 import 'streamdown/styles.css'
 
-import { linkClickMode } from '../../lib/linkClickMode'
 import { isSynthesizedAutolink } from '../../lib/markdownAutolink'
 import { messageRehypePlugins } from '../../lib/messageRehypePlugins'
-import { isMac } from '../../lib/platform'
-import { ContextMenu } from '../ContextMenu'
+import { isRuntimeFilePath } from '../../lib/runtimeFileLink'
 
-import { ChatLinkMenuContext, isChatMenuLink } from './chatLinkMenuContext'
+import { ChatLink } from './ChatLink'
 import { ReplyImage } from './ReplyImage'
 
-import type { ContextMenuItem } from '../ContextMenu'
-import type { ComponentProps, MouseEvent, ReactNode } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 type StreamdownComponents = ComponentProps<typeof Streamdown>['components']
 type StreamdownAnimated = ComponentProps<typeof Streamdown>['animated']
@@ -40,87 +36,6 @@ function extractText(node: ReactNode): string {
   }
 
   return ''
-}
-
-export function ChatLink({
-  link,
-  onLinkClick,
-  className = 'text-zViolet-accent hover:underline',
-  title,
-  children,
-}: {
-  link: string | undefined
-  onLinkClick?: (href: string, beside: boolean) => boolean
-  className?: string
-  title?: string
-  children: ReactNode
-}) {
-  const menuActions = useContext(ChatLinkMenuContext)
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
-
-  const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-    if (!link || !onLinkClick) return
-    // ⌘-click (Ctrl elsewhere) asks to open the link beside this pane; a
-    // handler that declines leaves the browser default.
-    const mode = linkClickMode(event, isMac)
-
-    if (!mode) return
-    if (onLinkClick(link, mode === 'beside')) {
-      event.preventDefault()
-      event.stopPropagation()
-    }
-  }
-
-  const handleContextMenu = (event: MouseEvent<HTMLAnchorElement>) => {
-    if (!link || !menuActions || !isChatMenuLink(link)) return
-    event.preventDefault()
-    event.stopPropagation()
-    setMenu({ x: event.clientX, y: event.clientY })
-  }
-
-  const items: ContextMenuItem[] =
-    link && menuActions
-      ? [
-          {
-            key: 'open-in-app',
-            label: 'Open in Nuphos',
-            icon: PanelRight,
-            onSelect: () => menuActions.openInApp(link),
-          },
-          {
-            key: 'open-external',
-            label: 'Open in external browser',
-            icon: ExternalLink,
-            onSelect: () => menuActions.openExternal(link),
-          },
-          { key: 'sep', separator: true },
-          {
-            key: 'copy-link',
-            label: 'Copy link',
-            icon: Link2,
-            onSelect: () => menuActions.copyLink(link),
-          },
-        ]
-      : []
-
-  return (
-    <>
-      <a
-        href={link}
-        target="_blank"
-        rel="noreferrer"
-        onClick={handleClick}
-        onContextMenu={handleContextMenu}
-        className={className}
-        title={title}
-      >
-        {children}
-      </a>
-      {menu && items.length > 0 && (
-        <ContextMenu x={menu.x} y={menu.y} items={items} onClose={() => setMenu(null)} />
-      )}
-    </>
-  )
 }
 
 function createComponents(
@@ -180,6 +95,49 @@ function createComponents(
         <ChatLink link={link} onLinkClick={onLinkClick}>
           {children}
         </ChatLink>
+      )
+    },
+    inlineCode: ({ children, className }) => {
+      const text = extractText(children).trim()
+      const code = <code className={className}>{children}</code>
+
+      if (!isRuntimeFilePath(text)) return code
+
+      return (
+        <ChatLink link={text} onLinkClick={onLinkClick}>
+          {code}
+        </ChatLink>
+      )
+    },
+    // A block of nothing but paths becomes file links; anything else keeps
+    // Streamdown's highlighted block (its default `pre` marks the code).
+    pre: ({ children }) => {
+      const lines = extractText(children)
+        .trim()
+        .split('\n')
+        .map((line) => line.trim())
+
+      if (!lines.every(isRuntimeFilePath))
+        return (
+          <>
+            {isValidElement(children)
+              ? cloneElement(children as ReactElement<Record<string, unknown>>, {
+                  'data-block': 'true',
+                })
+              : children}
+          </>
+        )
+
+      return (
+        <pre className="my-3 overflow-x-auto rounded-md bg-zGray-900 px-3 py-2 font-mono text-[13px]">
+          {lines.map((line, index) => (
+            <div key={index}>
+              <ChatLink link={line} onLinkClick={onLinkClick}>
+                {line}
+              </ChatLink>
+            </div>
+          ))}
+        </pre>
       )
     },
     blockquote: ({ children }) => (

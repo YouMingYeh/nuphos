@@ -9,7 +9,7 @@ import {
   GitPullRequestDraft,
 } from 'lucide-react'
 
-import { ChatLink } from '../MessageResponse'
+import { ChatLink } from '../ChatLink'
 
 import { useGithubRef } from './githubRefStore'
 

@@ -1,7 +1,7 @@
 import { AppWindow, ArrowUpRight } from 'lucide-react'
 
 import { isMac } from '../../../lib/platform'
-import { ChatLink } from '../MessageResponse'
+import { ChatLink } from '../ChatLink'
 
 import type { LocalUrl } from './localUrls'
 

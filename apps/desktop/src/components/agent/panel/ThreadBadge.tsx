@@ -1,7 +1,7 @@
 import clsx from 'clsx'
 import { Check, ChevronRight, CircleAlert, Loader2, MessagesSquare, Square } from 'lucide-react'
 
-import { ChatLink } from '../MessageResponse'
+import { ChatLink } from '../ChatLink'
 
 import { knownThreadTitle, rememberThreadTitle, threadBadgeInfo } from './threadBadges'
 import { useThreadStatus } from './useThreadStatus'
