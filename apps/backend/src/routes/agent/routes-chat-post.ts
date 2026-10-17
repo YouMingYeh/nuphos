@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { initializeSessionBypass } from '@/lib/agent/auto-mode/store'
 import { regionLabel } from '@/lib/agent/model-provider'
 import { startTraceSpan } from '@/lib/agent/tracing'
+import { wakeOfflineBox } from '@/lib/agent/devices/box-instabox'
 import { resolveConversationChatRuntime } from '@/lib/claude-code-preview/agent-chat-runtime'
 import { conversationExecutionState } from '@/lib/claude-code-preview/session-execution-state'
 import { AppError } from '@/lib/errors'
@@ -112,7 +113,32 @@ agent.post('/chat', async (c) => {
     userId,
     ...(body.agentRuntime ? { runtime: body.agentRuntime } : {}),
     ...(body.runtimeId ? { runtimeId: body.runtimeId } : {}),
+  }).catch(async (error: unknown) => {
+    // An offline Box resumes in the background and the message waits in the session
+    // queue, so the send answers at once instead of holding the request for the Box.
+    if (
+      error instanceof AppError &&
+      error.code === 'runtime_offline' &&
+      !readOnlyResume &&
+      (await wakeOfflineBox(body.runtimeId ?? conversationForResume?.runtimeId))
+    ) {
+      const queue = await admitQueueableChat({
+        ...resumeParams,
+        conversation: conversationForResume,
+        clientView,
+        snapshot: undefined,
+        slackBound: Boolean(slackThread),
+        credentialAccess: requestedCredentialAccess?.access,
+        context: queuedChatContext(c, locale, localToolsEnabled, kubeContext),
+        runtimeOffline: true,
+      })
+
+      if (queue?.mode === 'queued') return null
+    }
+    throw error
   })
+
+  if (!chatRuntime) return c.json({ status: 'queued', streamId }, 202)
   const runtimeProvider = chatRuntime.runtime
   const runtimeModelId = chatRuntime.runtime
   let releaseAgentRunClaim: (() => void) | null = null

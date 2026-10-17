@@ -4,7 +4,6 @@ import {
   requireDeviceAccess,
 } from '@/lib/agent/devices/box-access'
 import { registryKey, reportedAgents, withReport } from '@/lib/agent/devices/agent-registry'
-import { wakeBox } from '@/lib/agent/devices/box-instabox'
 import {
   localRuntimeId,
   localRuntimeUrl,
@@ -62,18 +61,12 @@ export type LocalRuntimeCatalogDeps = {
   access: DeviceAccessDeps
   isMember: (userId: string, teamId: string) => Promise<boolean>
   getPresence: (userId: string, deviceId: string) => Promise<LocalRuntimePresence | null>
-  /** Resumes an offline Box and returns its presence once it is back; undefined otherwise. */
-  wakeDevice: (userId: string, deviceId: string) => Promise<LocalRuntimePresence | undefined>
 }
 
 const defaultDeps: LocalRuntimeCatalogDeps = {
   access: deviceAccessDeps,
   isMember: (userId, teamId) => isActiveTeamMember(userId, teamId),
   getPresence: (userId, deviceId) => runtimePresenceStore().get(userId, deviceId),
-  wakeDevice: async (userId, deviceId) =>
-    (await wakeBox(userId, deviceId))
-      ? ((await runtimePresenceStore().get(userId, deviceId)) ?? undefined)
-      : undefined,
 }
 
 /** Explicit instances never fall back to a provider's legacy default. */
@@ -194,9 +187,8 @@ export async function resolveLocalRuntimeEndpoint(
     if (error instanceof AppError && error.status === 404) throw notAvailable()
     throw error
   }
-  const found = await deps.getPresence(ref.userId, ref.deviceId)
-  // A paused Box is resumed and given a moment to reconnect before it counts as offline.
-  const presence = found ?? (await deps.wakeDevice(ref.userId, ref.deviceId)) ?? null
+  // An offline Box is not woken here: the session queue waits for it (queued-turn.ts).
+  const presence = await deps.getPresence(ref.userId, ref.deviceId)
   const agent = reportedLocalAgent(presence?.status, ref)
 
   // Signing in needs only the computer: an agent added a moment ago may not be in its last

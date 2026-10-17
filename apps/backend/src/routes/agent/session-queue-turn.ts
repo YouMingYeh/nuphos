@@ -43,6 +43,8 @@ type QueueableChat = {
   slackBound: boolean
   context: Omit<QueuedChatTurn, 'streamId' | 'message' | 'credentialAccess'>
   credentialAccess: AgentCredentialAccess | undefined
+  /** Its Box is offline and resuming: the message waits in the queue for it. */
+  runtimeOffline?: boolean
 }
 
 /** The per-turn desktop context a queued send runs with later. */
@@ -108,7 +110,8 @@ export async function admitQueueableChat(
     return null
   }
   // Without an authoritative runtime status the earlier admission answers 503.
-  if (conversation.claudeCodePreview && args.snapshot?.schemaVersion !== 2) return null
+  if (conversation.claudeCodePreview && args.snapshot?.schemaVersion !== 2 && !args.runtimeOffline)
+    return null
   if (!QUEUED_ID.test(message.id))
     throw new AppError(400, 'invalid_request', 'A message id may use letters, digits, - and _')
   if (JSON.stringify(message).length > MAX_QUEUED_MESSAGE_CHARS)
@@ -120,7 +123,9 @@ export async function admitQueueableChat(
     ? null
     : await claimAgentRunForSession(owner, sessionId)
   // Runtime-owned work (an automatic continuation) holds no backend claim.
-  const runtimeBusy = args.snapshot?.schemaVersion === 2 && !args.snapshot.actions?.send
+  const runtimeBusy =
+    args.runtimeOffline === true ||
+    (args.snapshot?.schemaVersion === 2 && !args.snapshot.actions?.send)
 
   const item: PendingUserMessage = {
     ...buildPendingUserMessage({

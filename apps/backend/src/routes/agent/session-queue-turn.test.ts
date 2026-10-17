@@ -146,6 +146,17 @@ test('a runtime busy outside any backend turn queues the message too', async () 
   expect((await listPendingUserMessages(OWNER, SESSION)).map((m) => m.id)).toEqual(['wait'])
 })
 
+test('a send to an offline Box queues at once, even on a free session without a runtime status', async () => {
+  const box = { ...conversation, claudeCodePreview: {} } as AgentConversation
+
+  // Without the Box there is no runtime status; an ordinary send keeps the earlier admission.
+  expect(await admit('plain', { conversation: box })).toBeNull()
+  expect((await admit('offline', { conversation: box, runtimeOffline: true }))?.mode).toBe('queued')
+  expect((await listPendingUserMessages(OWNER, SESSION)).map((item) => item.id)).toEqual([
+    'offline',
+  ])
+})
+
 test('an agent message waits behind a person who sent first, even on a free session', async () => {
   const done = busy()
 
