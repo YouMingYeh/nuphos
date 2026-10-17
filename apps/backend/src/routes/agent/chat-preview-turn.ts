@@ -15,7 +15,7 @@ import {
   handedOff,
   lostToReattach,
 } from './chat-preview-handoff'
-import { carriedUserMessages, preparePreviewTurn, requeueCarried } from './chat-preview-prepare'
+import { carriedUserMessages, preparePreviewTurn } from './chat-preview-prepare'
 import { createPreviewRunState, createPreviewToolLog } from './chat-preview-run'
 import { handlePreviewToolUpdate } from './chat-preview-tool-update'
 import { appendAgentRunError, appendAgentRunPhase } from './run-frames'
@@ -27,6 +27,7 @@ import type { UIMessage } from 'ai'
 
 import { config } from '@/config'
 import { recordLocalRuntimeTurn } from '@/lib/agent/devices/local-runtime/activity'
+import { requeueTurnQueue } from '@/lib/agent/session-released'
 import { consumePreviewMemoryActivity } from '@/lib/agent/memory-slots/preview-activity'
 import {
   previewRuntimeObservability,
@@ -40,7 +41,7 @@ import {
   interruptToolSteps,
 } from '@/lib/claude-code-preview/preview-transcript'
 import { watchPreviewTurnPauses } from '@/lib/claude-code-preview/preview-turn-pause'
-import { isRuntimeRefusal } from '@/lib/claude-code-preview/runtime-refusal'
+import { isRuntimeRefusal, queuedRefusal } from '@/lib/claude-code-preview/runtime-refusal'
 import {
   createSteeringAttribution,
   steeringReceipt,
@@ -62,7 +63,7 @@ export async function runClaudeCodePreviewChatTurn(args: PreviewChatTurnArgs): P
   const answers: string[] = []
   const toolLog = createPreviewToolLog()
   const state = createPreviewRunState({ run, userId, sessionId })
-  const desktops = desktopTracker({ sessionId, runtimeId: args.endpoint.runtimeId })
+  const tracking = desktopTracker({ sessionId, runtimeId: args.endpoint.runtimeId })
   const diagnostic = createTurnDiagnostics(
     {
       streamId: run.streamId,
@@ -81,7 +82,7 @@ export async function runClaudeCodePreviewChatTurn(args: PreviewChatTurnArgs): P
   const segmentStepStart = 0
 
   appendAgentRunPhase(run, 'connecting-model')
-  const prepared = await preparePreviewTurn(args, requestId)
+  const [prepared, desktops] = await Promise.all([preparePreviewTurn(args, requestId), tracking])
   const clearActiveTurn = () => prepared.clearActiveTurn()
 
   state.consumeFrames((frame) =>
@@ -244,16 +245,16 @@ export async function runClaudeCodePreviewChatTurn(args: PreviewChatTurnArgs): P
 
       return 'connection-lost'
     }
-    if (args.clientResendsRefusal && isRuntimeRefusal(err))
-      await requeueCarried(userId, sessionId, prepared.carried)
+    if ((args.clientResendsRefusal || args.queued) && isRuntimeRefusal(err))
+      await requeueTurnQueue(userId, sessionId, prepared.carried, args.queued)
     else await persistInterrupted(err)
 
     state.unbind()
     await clearActiveTurn()
     // After a handoff the original run is already closed; the continuation
     // run must carry the error itself instead of the caller's catch.
-    if (!state.handedOff()) throw err
-    appendAgentRunError(state.current(), err)
+    if (!state.handedOff()) throw queuedRefusal(err, args.queued)
+    appendAgentRunError(state.current(), queuedRefusal(err, args.queued))
     state.finish()
 
     return
@@ -270,8 +271,7 @@ export async function runClaudeCodePreviewChatTurn(args: PreviewChatTurnArgs): P
     return
   }
   pauses.abort()
-  // Runtime completion is authoritative; partial/late tool cards cannot cause
-  // backend cancellation or another prompt after completion.
+  // Runtime completion is authoritative: late tool cards cause no cancel or re-prompt.
   if (acc.text) answers.push(acc.text)
 
   await prepared.openPromptSuggestion()
