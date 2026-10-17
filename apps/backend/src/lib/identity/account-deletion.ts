@@ -1,6 +1,5 @@
 import { ObjectId } from 'mongodb'
 
-
 import { db } from '@/lib/db'
 import { verifyEmailOtp } from '@/lib/email-otp'
 import { AppError } from '@/lib/errors'

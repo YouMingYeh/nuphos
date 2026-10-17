@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto'
 
 import './chat-preview-autonomous-runs'
 
-
 import { config } from '@/config'
 import { recordLocalRuntimeTurn } from '@/lib/agent/devices/local-runtime/activity'
 import { requeueTurnQueue } from '@/lib/agent/session-released'

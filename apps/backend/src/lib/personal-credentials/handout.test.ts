@@ -1,70 +1,65 @@
-import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { beforeEach, describe, expect, test } from 'bun:test'
 import { ObjectId } from 'mongodb'
 
-import * as githubActual from '@/lib/personal-credentials/github'
-import * as sealActual from '@/lib/personal-credentials/seal'
-import * as modelsActual from '@/models'
+import { useByosSecrets } from '@/lib/test/doubles/byos-secrets'
+import { useModels } from '@/lib/test/doubles/models'
+import { usePersonalCredentialsGithub } from '@/lib/test/doubles/personal-credentials-github'
 
+import { personalGithubToken, personalLinearToken } from './handout'
+
+import type { ProviderTokens } from './github'
+import type { EncryptedSecret } from '@/lib/byos/secrets'
 import type { PersonalCredential } from '@/models'
-
-// bun runs every test file in one process: snapshot the real modules now and
-// restore them after the suite so these mocks do not leak.
-const snapshots = {
-  github: { ...githubActual },
-  seal: { ...sealActual },
-  models: { ...modelsActual },
-}
-
-afterAll(async () => {
-  await mock.module('@/lib/personal-credentials/github', () => snapshots.github)
-  await mock.module('@/lib/personal-credentials/seal', () => snapshots.seal)
-  await mock.module('@/models', () => snapshots.models)
-})
 
 let rows: PersonalCredential[] = []
 let visibleInstallations: number[] = []
-let refreshResult: () => Promise<githubActual.ProviderTokens>
+let refreshResult: () => Promise<ProviderTokens>
 
 const matches = (row: PersonalCredential, filter: Record<string, unknown>) =>
-  Object.entries(filter).every(([key, value]) =>
-    value instanceof ObjectId
-      ? (row as Record<string, unknown>)[key]?.toString() === value.toString()
-      : value instanceof Date
-        ? ((row as Record<string, unknown>)[key] as Date).getTime() === value.getTime()
-        : (row as Record<string, unknown>)[key] === value,
-  )
+  Object.entries(filter).every(([key, value]) => {
+    const actual = (row as Record<string, unknown>)[key]
 
-await mock.module('@/models', () => ({
-  ...snapshots.models,
-  personalCredentials: () => ({
-    findOne: (filter: Record<string, unknown>) =>
-      Promise.resolve(rows.find((row) => matches(row, filter)) ?? null),
-    updateOne: (filter: Record<string, unknown>, update: { $set: Partial<PersonalCredential> }) => {
-      rows = rows.map((row) => (matches(row, filter) ? { ...row, ...update.$set } : row))
+    if (value instanceof ObjectId || value instanceof Date) return String(actual) === String(value)
 
-      return Promise.resolve({})
-    },
-    deleteOne: (filter: Record<string, unknown>) => {
-      rows = rows.filter((row) => !matches(row, filter))
+    return actual === value
+  })
 
-      return Promise.resolve({})
-    },
-  }),
-}))
-await mock.module('@/lib/personal-credentials/seal', () => ({
-  seal: (_provider: string, plaintext: string) => ({ plaintext }),
-  open: (_provider: string, envelope: { plaintext: string }) => envelope.plaintext,
-}))
-await mock.module('@/lib/personal-credentials/github', () => ({
-  ...snapshots.github,
+useModels({
+  personalCredentials: () =>
+    ({
+      findOne: (filter: Record<string, unknown>) =>
+        Promise.resolve(rows.find((row) => matches(row, filter)) ?? null),
+      updateOne: (
+        filter: Record<string, unknown>,
+        update: { $set: Partial<PersonalCredential> },
+      ) => {
+        rows = rows.map((row) => (matches(row, filter) ? { ...row, ...update.$set } : row))
+
+        return Promise.resolve({})
+      },
+      deleteOne: (filter: Record<string, unknown>) => {
+        rows = rows.filter((row) => !matches(row, filter))
+
+        return Promise.resolve({})
+      },
+    }) as never,
+})
+const fakeSeal = (plaintext: string) => ({ plaintext }) as unknown as EncryptedSecret
+const fakeOpen = (envelope: EncryptedSecret) =>
+  (envelope as unknown as { plaintext: string }).plaintext
+
+useByosSecrets({
+  encryptGithubSecret: fakeSeal,
+  decryptGithubSecret: fakeOpen,
+  encryptLinearSecret: fakeSeal,
+  decryptLinearSecret: fakeOpen,
+})
+usePersonalCredentialsGithub({
   githubUserInstallationIds: () => Promise.resolve(visibleInstallations),
   refreshGithubToken: () => refreshResult(),
-}))
+})
 
-const { personalGithubToken, personalLinearToken } = await import('./handout')
-
-const sealed = (plaintext: string) =>
-  ({ plaintext }) as unknown as PersonalCredential['encryptedAccessToken']
+const sealed = fakeSeal
 
 function credential(overrides: Partial<PersonalCredential>): PersonalCredential {
   const now = new Date()

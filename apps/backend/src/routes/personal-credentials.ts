@@ -37,7 +37,9 @@ personalCredentialRoutes.get('/', requireAuth, async (c) =>
 )
 
 personalCredentialRoutes.post('/:provider/start', requireAuth, async (c) =>
-  c.json(await startPersonalCredentialOAuth(c.get('userId'), providerParam(c.req.param('provider')))),
+  c.json(
+    await startPersonalCredentialOAuth(c.get('userId'), providerParam(c.req.param('provider'))),
+  ),
 )
 
 personalCredentialRoutes.delete('/:provider', requireAuth, async (c) => {
