@@ -20,9 +20,8 @@ import type { PersonalCredentialProvider } from '@/models'
 // never start, list or remove a Personal Credential.
 export const personalCredentialRoutes = new Hono<{ Variables: AuthVariables }>()
 
-// Reopens the Settings section, which refetches the list.
+// Brings the app forward; the open Settings section refetches on focus.
 const DESKTOP_RETURN = 'nuphos://open'
-const SETTINGS_PATH = '/settings/personal-credentials'
 
 function providerParam(value: string | undefined): PersonalCredentialProvider {
   if (!PERSONAL_CREDENTIAL_PROVIDERS.includes(value as PersonalCredentialProvider)) {
@@ -55,9 +54,7 @@ personalCredentialRoutes.get('/:provider/callback', async (c) => {
   const state = c.req.query('state') ?? ''
   const code = c.req.query('code') ?? ''
   const back = (params: Record<string, string>) =>
-    desktopCallbackResponse(c, DESKTOP_RETURN, {
-      path: `${SETTINGS_PATH}?${new URLSearchParams(params).toString()}`,
-    })
+    desktopCallbackResponse(c, DESKTOP_RETURN, params)
 
   if (!state || !code) return back({ error: c.req.query('error') ?? 'missing_code' })
   try {
