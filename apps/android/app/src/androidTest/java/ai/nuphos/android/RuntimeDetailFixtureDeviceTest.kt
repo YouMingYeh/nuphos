@@ -76,7 +76,7 @@ class RuntimeDetailFixtureDeviceTest {
         click("Remove Agent"); assertEquals(0, removals)
         compose.onNodeWithText("Remove Design workspace?").assertExists()
         capture("agent-detail-remove-light.png")
-        click("Cancel"); assertEquals(0, removals)
+        compose.onNodeWithText("Cancel").performClick(); assertEquals(0, removals)
         click("Remove Agent")
         compose.onNode(hasText("Remove Agent") and hasAnyAncestor(isDialog())).performClick()
         compose.waitUntil { removals == 1 }
@@ -93,6 +93,8 @@ class RuntimeDetailFixtureDeviceTest {
         compose.onNode(isToggleable()).performScrollTo().performClick()
         compose.waitUntil { updates == 3 && !store.busy }
         click("Sign In Again"); assertEquals(1, signIns)
+        click("Remove Agent"); capture("agent-detail-remove-dark.png")
+        compose.onNodeWithText("Cancel").performClick(); assertEquals(0, removals)
     }
     @Test fun localAndMemberHaveNoDestructiveControls() {
         render(false, admin = false, item = initial.copy(kind = "local"))
