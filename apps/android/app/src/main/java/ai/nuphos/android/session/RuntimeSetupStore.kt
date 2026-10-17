@@ -34,8 +34,11 @@ class RuntimeSetupStore(
     private var poll: Job? = null
     private fun current(ticket: Long) = active && selection.valid && generation == ticket && sourceCurrent()
     private fun loginTargetCurrent() = selection.selected?.let {
-        it.kind == "managed" && it.id == selection.loginRuntimeId && it.provider == selection.loginProvider
+        it.kind in setOf("managed", "external") && it.id == selection.loginRuntimeId && it.provider == selection.loginProvider
     } == true
+    fun detail(runtimeId: String): RuntimeDetailStore? = (api as? RuntimeManagementTransport)?.let {
+        RuntimeDetailStore(it, api, scope, { active && isSourceCurrent() }, { canAdminister }, selection, runtimeId, expired)
+    }
     fun isSourceCurrent() = selection.valid && sourceCurrent()
     val canAdminister get() = isSourceCurrent() && administrator()
     fun open() { active = true; refresh() }
@@ -114,7 +117,7 @@ class RuntimeSetupStore(
         if (active && canAdminister && !state.busy && state.catalogLoaded) selection.createReview = false
     }
     fun startLogin() {
-        val runtime = selection.selected?.takeIf { it.kind == "managed" } ?: return
+        val runtime = selection.selected?.takeIf { it.kind in setOf("managed", "external") && it.status == "active" } ?: return
         if (selection.loginReview) return
         launch(admin = true) { ticket ->
             selection.loginReview = true; selection.loginRuntimeId = runtime.id; selection.loginProvider = runtime.provider; selection.loginAttemptId = null
