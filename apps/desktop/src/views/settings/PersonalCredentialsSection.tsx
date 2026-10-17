@@ -17,7 +17,7 @@ const PROVIDERS: { provider: PersonalCredentialProvider; name: string; descripti
     provider: 'github',
     name: 'GitHub',
     description:
-      'Act as yourself on GitHub — commits, PRs and comments are authored by you instead of nuphos[bot].',
+      'Act as yourself on GitHub — commits, PRs and comments are authored by you instead of nuphos[bot]. Conversations scoped to one repository keep using nuphos[bot].',
   },
   {
     provider: 'linear',
@@ -28,14 +28,21 @@ const PROVIDERS: { provider: PersonalCredentialProvider; name: string; descripti
 
 export function PersonalCredentialsSection() {
   const [credentials, setCredentials] = useState<PersonalCredential[] | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [busy, setBusy] = useState<PersonalCredentialProvider | null>(null)
   const [disconnecting, setDisconnecting] = useState<PersonalCredentialProvider | null>(null)
 
   const refresh = useCallback(() => {
     void api
       .atlasListPersonalCredentials()
-      .then(setCredentials)
-      .catch((err: unknown) => toast.apiError('Could not load Personal Credentials', err))
+      .then((list) => {
+        setCredentials(list)
+        setLoadFailed(false)
+      })
+      .catch((err: unknown) => {
+        setLoadFailed(true)
+        toast.apiError('Could not load Personal Credentials', err)
+      })
   }, [])
 
   // Refetch after a claimed deep link, and on focus as a fallback.
@@ -86,11 +93,21 @@ export function PersonalCredentialsSection() {
         title="Personal Credentials"
         description="Connect your own accounts so the agent acts as you when you send a message."
       />
+      {!credentials && loadFailed && (
+        <p className="text-[12.5px] text-tertiary">
+          Couldn’t load your Personal Credentials.{' '}
+          <Button type="button" size="sm" variant="secondary" onClick={refresh}>
+            Retry
+          </Button>
+        </p>
+      )}
       {!credentials ? (
-        <div aria-busy="true" className="space-y-3">
-          <div className="h-[72px] animate-pulse rounded-lg bg-zGray-800/40" />
-          <div className="h-[72px] animate-pulse rounded-lg bg-zGray-800/40" />
-        </div>
+        !loadFailed && (
+          <div aria-busy="true" className="space-y-3">
+            <div className="h-[72px] animate-pulse rounded-lg bg-zGray-800/40" />
+            <div className="h-[72px] animate-pulse rounded-lg bg-zGray-800/40" />
+          </div>
+        )
       ) : (
         <div className="space-y-3">
           {PROVIDERS.map(({ provider, name, description }) => {
