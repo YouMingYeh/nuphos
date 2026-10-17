@@ -66,6 +66,8 @@ class RuntimeDetailFixtureDeviceTest {
     private fun click(text: String) = compose.onNodeWithText(text).performScrollTo().performClick()
     private fun capture(name: String) {
         compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        android.os.SystemClock.sleep(500) // Let the platform dialog transition finish before capturing.
         val dir = InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null)!!
         File(dir, name).outputStream().use { InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
@@ -87,6 +89,7 @@ class RuntimeDetailFixtureDeviceTest {
         compose.onNodeWithText("Agent name").performTextReplacement("Renamed fixture")
         click("Save name"); compose.waitUntil { updates == 1 && !store.busy }
         assertEquals("Renamed fixture", store.runtime?.label)
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
         compose.onNode(isToggleable()).performScrollTo().performClick()
         compose.waitUntil { updates == 2 && !store.busy }; assertEquals("disabled", store.runtime?.status)
         compose.onNodeWithText("Sign In Again").assertDoesNotExist()
