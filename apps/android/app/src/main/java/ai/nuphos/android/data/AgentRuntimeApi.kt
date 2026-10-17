@@ -72,8 +72,8 @@ class AgentRuntimeApi internal constructor(private val token: String, teamId: St
         }.toString(), 200))
     }
     override suspend fun remove(runtimeId: String): Boolean {
-        val result = execute(runtimePath(runtimeId), "DELETE", expected = 204, alternate = 202)
-        if (result.isEmpty()) return false
+        val (status, result) = executeResponse(runtimePath(runtimeId), "DELETE", expected = 204, alternate = 202)
+        if (status == 204) return false
         if (result["status"]?.jsonPrimitive?.contentOrNull != "deleting") throw NuphosApi.Failure.InvalidResponse
         return true
     }
@@ -112,7 +112,9 @@ class AgentRuntimeApi internal constructor(private val token: String, teamId: St
             if (state == "awaiting_authorization") field("authorizationUrl") else null,
             state == "awaiting_authorization" && obj["codeSubmitted"]?.jsonPrimitive?.booleanOrNull == true)
     } catch (_: Exception) { throw NuphosApi.Failure.InvalidResponse }
-    private suspend fun execute(path: String, method: String, body: String? = null, expected: Int, alternate: Int? = null): JsonObject = withContext(Dispatchers.IO) {
+    private suspend fun execute(path: String, method: String, body: String? = null, expected: Int): JsonObject =
+        executeResponse(path, method, body, expected).second
+    private suspend fun executeResponse(path: String, method: String, body: String? = null, expected: Int, alternate: Int? = null): Pair<Int, JsonObject> = withContext(Dispatchers.IO) {
         val request = Request.Builder().url("${NuphosApi.BASE_URL}/$path")
             .header("Authorization", "Bearer $token").header("Accept", "application/json")
             .header("x-atlas-client", Http.clientHeader()).method(method, body?.toRequestBody(Http.jsonMedia)).build()
@@ -125,8 +127,9 @@ class AgentRuntimeApi internal constructor(private val token: String, teamId: St
                 throw RuntimeHttpFailure(response.code, code)
             }
             if (response.code != expected && response.code != alternate) throw NuphosApi.Failure.InvalidResponse
-            if (response.code == 204) JsonObject(emptyMap()) else try { Http.json.parseToJsonElement(text).jsonObject }
+            val result = if (response.code == 204) JsonObject(emptyMap()) else try { Http.json.parseToJsonElement(text).jsonObject }
             catch (_: Exception) { throw NuphosApi.Failure.InvalidResponse }
+            response.code to result
         }
     }
 }

@@ -30,6 +30,10 @@ class AgentRuntimeApiTest {
         assertEquals("/teams/507f1f77bcf86cd799439011/agent-runtimes/saved-id", requests.last().url.encodedPath)
         status = 202; response = """{"status":"deleting"}"""
         assertTrue(api.remove("saved-id")); assertEquals("DELETE", requests.last().method)
+        for (invalid in listOf("{}", """{"status":"disconnected"}""")) {
+            response = invalid
+            try { api.remove("saved-id"); fail() } catch (_: NuphosApi.Failure.InvalidResponse) { }
+        }
         status = 204; response = ""; assertFalse(api.remove("saved-id"))
         val count = requests.size
         try { api.update("../other", label = "Name"); fail() } catch (_: IllegalArgumentException) { }
