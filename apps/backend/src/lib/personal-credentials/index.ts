@@ -121,15 +121,25 @@ type Identity = Pick<
   'providerUserId' | 'login' | 'workspaceId' | 'workspaceName'
 >
 
-/** Exchanges the code, verifies who it belongs to, and stores it for the user that started the flow. */
-export async function completePersonalCredentialOAuth(
+/**
+ * The browser callback: exchanges the code and stages the grant. Saving it
+ * straight away would trust whoever approved at the provider, so it waits for
+ * claimPersonalCredential: only the approver's own app gets the one-time code,
+ * and claiming also needs the session of the member who started the flow.
+ */
+export async function stagePersonalCredentialOAuth(
   provider: PersonalCredentialProvider,
   state: string,
   code: string,
-): Promise<PersonalCredentialSummary> {
-  const pending = await personalCredentialPendingOAuth().findOneAndDelete({ _id: state, provider })
+): Promise<{ state: string; code: string }> {
+  const pending = await personalCredentialPendingOAuth().findOneAndDelete({
+    _id: state,
+    provider,
+    staged: { $exists: false },
+    expiresAt: { $gt: new Date() },
+  })
 
-  if (!pending || pending.expiresAt.getTime() < Date.now()) {
+  if (!pending) {
     throw new AppError(
       400,
       'invalid_state',
@@ -167,17 +177,48 @@ export async function completePersonalCredentialOAuth(
       workspaceName: viewer.organization.name,
     }
   }
+  const claimCode = randomBytes(24).toString('base64url')
+
+  await personalCredentialPendingOAuth().insertOne({
+    _id: state,
+    userId: pending.userId,
+    provider,
+    codeHash: sha256(claimCode),
+    staged: {
+      ...identity,
+      encryptedAccessToken: seal(provider, tokens.accessToken),
+      encryptedRefreshToken: tokens.refreshToken ? seal(provider, tokens.refreshToken) : null,
+      accessTokenExpiresAt: tokens.expiresAt,
+    },
+    expiresAt: new Date(Date.now() + PENDING_TTL_MS),
+  })
+
+  return { state, code: claimCode }
+}
+
+/** Saves a staged grant for the member who started it, given the callback's one-time code. */
+export async function claimPersonalCredential(
+  userId: string,
+  provider: PersonalCredentialProvider,
+  state: string,
+  code: string,
+): Promise<PersonalCredentialSummary> {
+  const ready = await personalCredentialPendingOAuth().findOneAndDelete({
+    _id: state,
+    provider,
+    userId,
+    codeHash: sha256(code),
+    expiresAt: { $gt: new Date() },
+  })
+
+  if (!ready?.staged) {
+    throw new AppError(404, 'oauth_not_ready', 'No approved connection is waiting for this request')
+  }
   const now = new Date()
   const previous = await personalCredentials().findOneAndUpdate(
-    { userId: pending.userId, provider },
+    { userId, provider },
     {
-      $set: {
-        ...identity,
-        encryptedAccessToken: seal(provider, tokens.accessToken),
-        encryptedRefreshToken: tokens.refreshToken ? seal(provider, tokens.refreshToken) : null,
-        accessTokenExpiresAt: tokens.expiresAt,
-        updatedAt: now,
-      },
+      $set: { ...ready.staged, updatedAt: now },
       $setOnInsert: { _id: new ObjectId(), createdAt: now },
     },
     { upsert: true, returnDocument: 'before' },
@@ -187,10 +228,14 @@ export async function completePersonalCredentialOAuth(
 
   return {
     provider,
-    login: identity.login,
-    workspaceName: identity.workspaceName ?? null,
+    login: ready.staged.login,
+    workspaceName: ready.staged.workspaceName ?? null,
     connectedAt: (previous?.createdAt ?? now).toISOString(),
   }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 async function revokeAtProvider(doc: PersonalCredential): Promise<void> {

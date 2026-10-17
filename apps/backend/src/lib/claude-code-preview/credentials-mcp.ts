@@ -52,8 +52,8 @@ export function previewSessionEnv(args: {
   teamId: string
   /** Whose personal skills this turn may load, if anyone's. */
   personalSkillsOf?: string
-  /** A teammate acting in someone else's conversation; the runtime gives them their own HOME. */
-  guestActor?: string
+  /** Names a HOME other than the owner's: a teammate's own, or the automated turns' one. */
+  sessionActor?: string
 }): Record<string, string> {
   return {
     ...skillSyncEnv(args.teamId, args.personalSkillsOf, args.base),
@@ -63,7 +63,7 @@ export function previewSessionEnv(args: {
     NUPHOS_TOKEN: args.token,
     NUPHOS_BACKEND_URL: args.base,
     NUPHOS_SESSION_ID: args.conversationId,
-    ...(args.guestActor ? { NUPHOS_SESSION_ACTOR: args.guestActor } : {}),
+    ...(args.sessionActor ? { NUPHOS_SESSION_ACTOR: args.sessionActor } : {}),
     // Skills address team-scoped routes as /teams/$TEAM/...
     TEAM: args.teamId,
     NUPHOS_TEAM_ID: args.teamId,
@@ -81,6 +81,26 @@ export function previewMcpServers(
 ): AcpHttpMcpServer[] {
   return previewSessionAccess(conversationId, teamId, userId, conversationOwnerUserId, options)
     .mcpServers
+}
+
+// Automated turns (triggers, agent threads, resource events) share one HOME of
+// their own, so CLI logins a member's Personal Credentials wrote on their turns
+// are never on disk for work they did not send.
+export const AUTOMATED_SESSION_ACTOR = 'automated'
+
+export function previewSessionActor(
+  userId: string,
+  conversationOwnerUserId: string,
+  humanTurn?: boolean,
+): string | undefined {
+  if (!humanTurn) return AUTOMATED_SESSION_ACTOR
+
+  return userId === conversationOwnerUserId ? undefined : userId
+}
+
+/** Whether a session's current context is a member's own turn rather than an automated one. */
+export function isHumanTurnRuntime(runtime?: { env?: Record<string, string> }): boolean {
+  return Boolean(runtime?.env) && runtime?.env?.NUPHOS_SESSION_ACTOR !== AUTOMATED_SESSION_ACTOR
 }
 
 export type PreviewSessionAccessOptions = {
@@ -126,7 +146,7 @@ export function previewSessionAccess(
       // guest's turn gets none, so nobody's skills are written into a conversation
       // home that belongs to someone else.
       personalSkillsOf: userId === conversationOwnerUserId ? userId : undefined,
-      guestActor: userId === conversationOwnerUserId ? undefined : userId,
+      sessionActor: previewSessionActor(userId, conversationOwnerUserId, options?.humanTurn),
     }),
   }
 }

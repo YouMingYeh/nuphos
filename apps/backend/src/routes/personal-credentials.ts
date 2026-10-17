@@ -4,10 +4,11 @@ import { desktopCallbackResponse } from '@/lib/desktop-callback-page'
 import { AppError } from '@/lib/errors'
 import { logError } from '@/lib/observability'
 import {
-  completePersonalCredentialOAuth,
+  claimPersonalCredential,
   deletePersonalCredential,
   listPersonalCredentials,
   PERSONAL_CREDENTIAL_PROVIDERS,
+  stagePersonalCredentialOAuth,
   startPersonalCredentialOAuth,
 } from '@/lib/personal-credentials'
 import { requireAuth } from '@/middleware/auth'
@@ -20,8 +21,8 @@ import type { PersonalCredentialProvider } from '@/models'
 // never start, list or remove a Personal Credential.
 export const personalCredentialRoutes = new Hono<{ Variables: AuthVariables }>()
 
-// Brings the app forward; the open Settings section refetches on focus.
-const DESKTOP_RETURN = 'nuphos://open'
+// The approver's app claims the staged grant with its signed-in session.
+const DESKTOP_RETURN = 'nuphos://personal-credential'
 
 function providerParam(value: string | undefined): PersonalCredentialProvider {
   if (!PERSONAL_CREDENTIAL_PROVIDERS.includes(value as PersonalCredentialProvider)) {
@@ -41,6 +42,25 @@ personalCredentialRoutes.post('/:provider/start', requireAuth, async (c) =>
   ),
 )
 
+// The member's own app finishes a grant the callback staged, proving with the
+// callback's one-time code that the approval reached it.
+personalCredentialRoutes.post('/:provider/complete', requireAuth, async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { state?: unknown; code?: unknown } | null
+
+  if (typeof body?.state !== 'string' || typeof body.code !== 'string') {
+    throw new AppError(400, 'invalid_request', 'Body must include the callback state and code')
+  }
+
+  return c.json(
+    await claimPersonalCredential(
+      c.get('userId'),
+      providerParam(c.req.param('provider')),
+      body.state,
+      body.code,
+    ),
+  )
+})
+
 personalCredentialRoutes.delete('/:provider', requireAuth, async (c) => {
   await deletePersonalCredential(c.get('userId'), providerParam(c.req.param('provider')))
 
@@ -56,14 +76,12 @@ personalCredentialRoutes.get('/:provider/callback', async (c) => {
   const back = (params: Record<string, string>) =>
     desktopCallbackResponse(c, DESKTOP_RETURN, params)
 
-  if (!state || !code) return back({ error: c.req.query('error') ?? 'missing_code' })
+  if (!state || !code) return back({ provider, error: c.req.query('error') ?? 'missing_code' })
   try {
-    await completePersonalCredentialOAuth(provider, state, code)
-
-    return back({ connected: provider })
+    return back({ provider, ...(await stagePersonalCredentialOAuth(provider, state, code)) })
   } catch (error) {
     logError('personal_credential.callback_failed', error, { provider })
 
-    return back({ error: error instanceof AppError ? error.code : 'exchange_failed' })
+    return back({ provider, error: error instanceof AppError ? error.code : 'exchange_failed' })
   }
 })

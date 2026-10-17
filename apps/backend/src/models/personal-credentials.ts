@@ -36,6 +36,9 @@ export type PersonalCredentialPendingOAuth = {
   provider: PersonalCredentialProvider
   /** GitHub PKCE verifier, sealed with the provider's key. */
   encryptedCodeVerifier?: EncryptedSecret
+  /** After the callback: the exchanged grant, waiting for its starter to claim it with the code. */
+  staged?: Omit<PersonalCredential, '_id' | 'userId' | 'provider' | 'createdAt' | 'updatedAt'>
+  codeHash?: string
   // Mongo TTL index removes expired pending records once expiresAt passes.
   expiresAt: Date
 }
