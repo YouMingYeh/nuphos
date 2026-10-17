@@ -14,8 +14,8 @@ import {
   isGithubAppConfigured,
   listInstallationRepositories,
 } from '@/lib/byos/github'
-import { AppError } from '@/lib/errors'
 import { personalCredentialSender } from '@/lib/claude-code-preview/mcp-token'
+import { AppError } from '@/lib/errors'
 import { getNuphosUserById } from '@/lib/identity'
 import { parseObjectId } from '@/lib/objectid'
 import { personalGithubToken } from '@/lib/personal-credentials'

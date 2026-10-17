@@ -1,19 +1,12 @@
-// Personal Credentials: a member's own GitHub / Linear grant. The agent's two
-// existing credential handouts call personalGithubToken / personalLinearToken
-// with the turn's sender and fall back to the team token when they return null.
+// Personal Credentials: a member's own GitHub / Linear grant. Connect,
+// list and disconnect live here; the agent-facing handout is in ./handout.
 import { createHash, randomBytes } from 'node:crypto'
 
 import { ObjectId } from 'mongodb'
 
 import { config } from '@/config'
-import { buildAuthorizeUrl, exchangeCodeForTokens, refreshTokens } from '@/lib/byos/linear-oauth'
 import { getDefaultClientCredentials, getViewer } from '@/lib/byos/linear'
-import {
-  decryptGithubSecret,
-  decryptLinearSecret,
-  encryptGithubSecret,
-  encryptLinearSecret,
-} from '@/lib/byos/secrets'
+import { buildAuthorizeUrl, exchangeCodeForTokens } from '@/lib/byos/linear-oauth'
 import { AppError } from '@/lib/errors'
 import { logError } from '@/lib/observability'
 import { personalCredentialPendingOAuth, personalCredentials } from '@/models'
@@ -23,13 +16,11 @@ import {
   getGithubUser,
   githubAuthorizeUrl,
   githubOAuthClient,
-  githubUserInstallationIds,
-  refreshGithubToken,
   revokeGithubToken,
 } from './github'
+import { open, seal } from './seal'
 
 import type { ProviderTokens } from './github'
-import type { EncryptedSecret } from '@/lib/byos/secrets'
 import type { PersonalCredential, PersonalCredentialProvider } from '@/models'
 
 const PENDING_TTL_MS = 10 * 60 * 1000
@@ -37,11 +28,6 @@ const LINEAR_SCOPE = 'read,write'
 const LINEAR_REVOKE_URL = 'https://api.linear.app/oauth/revoke'
 
 export const PERSONAL_CREDENTIAL_PROVIDERS = ['github', 'linear'] as const
-
-const seal = (provider: PersonalCredentialProvider, plaintext: string) =>
-  provider === 'github' ? encryptGithubSecret(plaintext) : encryptLinearSecret(plaintext)
-const open = (provider: PersonalCredentialProvider, envelope: EncryptedSecret) =>
-  provider === 'github' ? decryptGithubSecret(envelope) : decryptLinearSecret(envelope)
 
 /** The callback sits on the same public origin as the provider's existing setup redirect. */
 function callbackUrl(provider: PersonalCredentialProvider): string | null {
@@ -130,7 +116,10 @@ export async function startPersonalCredentialOAuth(
   }
 }
 
-type Identity = Pick<PersonalCredential, 'providerUserId' | 'login' | 'workspaceId' | 'workspaceName'>
+type Identity = Pick<
+  PersonalCredential,
+  'providerUserId' | 'login' | 'workspaceId' | 'workspaceName'
+>
 
 /** Exchanges the code, verifies who it belongs to, and stores it for the user that started the flow. */
 export async function completePersonalCredentialOAuth(
@@ -141,7 +130,11 @@ export async function completePersonalCredentialOAuth(
   const pending = await personalCredentialPendingOAuth().findOneAndDelete({ _id: state, provider })
 
   if (!pending || pending.expiresAt.getTime() < Date.now()) {
-    throw new AppError(400, 'invalid_state', 'This authorization request expired or was already used')
+    throw new AppError(
+      400,
+      'invalid_state',
+      'This authorization request expired or was already used',
+    )
   }
   const redirectUri = callbackUrl(provider)
   let tokens: ProviderTokens
@@ -226,113 +219,9 @@ export async function deletePersonalCredential(
   if (doc) await revokeQuietly(doc)
 }
 
-// ── Handout ──
-
-export type PersonalToken = { token: string; expiresAt: Date | null; login: string }
-
-const refreshing = new Map<string, Promise<PersonalToken | null>>()
-
-function stillFresh(expiresAt: Date | null): boolean {
-  return expiresAt === null || expiresAt.getTime() - 5 * 60_000 > Date.now()
+export async function deleteAllPersonalCredentials(userId: string): Promise<void> {
+  await Promise.all(PERSONAL_CREDENTIAL_PROVIDERS.map((p) => deletePersonalCredential(userId, p)))
 }
 
-async function refresh(doc: PersonalCredential): Promise<PersonalToken | null> {
-  if (!doc.encryptedRefreshToken) return null
-  const refreshToken = open(doc.provider, doc.encryptedRefreshToken)
-  let tokens: ProviderTokens
-
-  try {
-    if (doc.provider === 'github') {
-      tokens = await refreshGithubToken(refreshToken)
-    } else {
-      const client = getDefaultClientCredentials()
-
-      if (!client) return null
-      tokens = await refreshTokens(client.clientId, client.clientSecret, refreshToken)
-    }
-  } catch (error) {
-    // Another replica may have rotated the refresh token first.
-    const latest = await personalCredentials().findOne({ _id: doc._id })
-
-    if (latest && stillFresh(latest.accessTokenExpiresAt) && latest.updatedAt > doc.updatedAt) {
-      return {
-        token: open(latest.provider, latest.encryptedAccessToken),
-        expiresAt: latest.accessTokenExpiresAt,
-        login: latest.login,
-      }
-    }
-    // The grant is gone (revoked or expired): drop it so the team token takes over.
-    logError('personal_credential.refresh_failed', error, { provider: doc.provider })
-    await personalCredentials().deleteOne({ _id: doc._id, updatedAt: doc.updatedAt })
-
-    return null
-  }
-  await personalCredentials().updateOne(
-    { _id: doc._id },
-    {
-      $set: {
-        encryptedAccessToken: seal(doc.provider, tokens.accessToken),
-        encryptedRefreshToken: tokens.refreshToken
-          ? seal(doc.provider, tokens.refreshToken)
-          : doc.encryptedRefreshToken,
-        accessTokenExpiresAt: tokens.expiresAt,
-        updatedAt: new Date(),
-      },
-    },
-  )
-
-  return { token: tokens.accessToken, expiresAt: tokens.expiresAt, login: doc.login }
-}
-
-async function currentToken(doc: PersonalCredential): Promise<PersonalToken | null> {
-  if (stillFresh(doc.accessTokenExpiresAt)) {
-    return {
-      token: open(doc.provider, doc.encryptedAccessToken),
-      expiresAt: doc.accessTokenExpiresAt,
-      login: doc.login,
-    }
-  }
-  const key = doc._id.toHexString()
-  const inflight = refreshing.get(key) ?? refresh(doc).finally(() => refreshing.delete(key))
-
-  refreshing.set(key, inflight)
-
-  return inflight
-}
-
-const installationAccess = new Map<string, number>()
-const INSTALLATION_ACCESS_TTL_MS = 10 * 60 * 1000
-
-/** The sender's GitHub token, when they connected one that can see this installation. */
-export async function personalGithubToken(
-  userId: string,
-  installationId: number,
-): Promise<PersonalToken | null> {
-  const doc = await personalCredentials().findOne({ userId, provider: 'github' })
-  const current = doc && (await currentToken(doc))
-
-  if (!doc || !current) return null
-  const key = `${doc._id.toHexString()}:${String(installationId)}`
-
-  if ((installationAccess.get(key) ?? 0) > Date.now()) return current
-  const visible = await githubUserInstallationIds(current.token).catch((error: unknown) => {
-    logError('personal_credential.installations_failed', error, { provider: 'github' })
-
-    return []
-  })
-
-  if (!visible.includes(installationId)) return null
-  installationAccess.set(key, Date.now() + INSTALLATION_ACCESS_TTL_MS)
-
-  return current
-}
-
-/** The sender's Linear token, when they connected the same workspace as this binding. */
-export async function personalLinearToken(
-  userId: string,
-  workspaceId: string,
-): Promise<PersonalToken | null> {
-  const doc = await personalCredentials().findOne({ userId, provider: 'linear', workspaceId })
-
-  return doc ? currentToken(doc) : null
-}
+export { personalGithubToken, personalLinearToken } from './handout'
+export type { PersonalToken } from './handout'
