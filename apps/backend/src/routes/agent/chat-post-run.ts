@@ -170,6 +170,8 @@ export function launchAcceptedChatTurn(args: {
         userId: run.userId,
         actorUserId: chatCtx.userId,
         origin: chatCtx.agentOrigin,
+        // The signed-in member posting from the app.
+        humanTurn: true,
         messages,
         firstMessage: args.firstMessage,
         locale: args.locale,

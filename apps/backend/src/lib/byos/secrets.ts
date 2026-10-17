@@ -45,6 +45,7 @@ export {
   encryptNotionSecret,
   encryptResendSecret,
 } from './secrets/saas'
+export { decryptGithubSecret, encryptGithubSecret } from './secrets/github'
 export type { EncryptedSecret } from './secrets/shared'
 export {
   decryptGitlabSecret,

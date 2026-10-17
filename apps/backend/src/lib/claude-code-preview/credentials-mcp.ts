@@ -83,7 +83,12 @@ export function previewMcpServers(
     .mcpServers
 }
 
-export type PreviewSessionAccessOptions = { external?: boolean; backendUrl?: string }
+export type PreviewSessionAccessOptions = {
+  external?: boolean
+  backendUrl?: string
+  /** The actor sent this turn's message (not a trigger or agent), so their Personal Credentials apply. */
+  humanTurn?: boolean
+}
 
 export function previewSessionAccess(
   conversationId: string,
@@ -102,6 +107,7 @@ export function previewSessionAccess(
     sessionId: conversationId,
     teamId,
     apiOrigin: base,
+    humanTurn: options?.humanTurn,
   })
   const headers = [{ name: 'Authorization', value: `Bearer ${token}` }]
 

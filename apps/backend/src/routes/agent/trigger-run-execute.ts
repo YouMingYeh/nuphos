@@ -64,6 +64,8 @@ export type TriggerRunParams = {
   triggerNotification?: SlackTriggerNotificationContext
 }
 
+const HUMAN_SENDER_SOURCES = new Set(['slack.agent', 'discord.agent', 'mcp'])
+
 /**
  * Execute an agent session on behalf of a trigger (cron or webhook).
  * Runs to completion without returning an HTTP stream to the trigger caller,
@@ -199,6 +201,9 @@ export async function executeAgentForTrigger(params: TriggerRunParams): Promise<
       userId: conversationOwnerUserId,
       actorUserId: userId,
       origin: params.origin ?? 'user',
+      // Only bridges whose actor is the verified human sender; triggers, agent
+      // threads and resource events keep the team's credentials.
+      humanTurn: HUMAN_SENDER_SOURCES.has(source),
       messages,
       firstMessage,
       locale,
