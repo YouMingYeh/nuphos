@@ -113,5 +113,6 @@ class RuntimeDetailFixtureDeviceTest {
         click("Start provider sign-in")
         compose.waitUntil(5_000) { signIns == 1 }
         assertEquals(0, updates); assertEquals(0, removals)
+        assertNull(selection.selectedId) // Managing sign-in must not choose a default for new chats.
     }
 }

@@ -89,6 +89,20 @@ class RuntimeDetailStoreTest {
         api.wrongIdentity = false; detail.refresh(); advanceUntilIdle(); detail.remove(); advanceUntilIdle()
         assertTrue(detail.removed); assertEquals(listOf("other"), selected.catalog.map { it.id })
     }
+    @Test fun roleLossAndAccountInvalidationIgnoreLateResponse() = runTest {
+        for (invalidate in listOf(false, true)) {
+            val api = Transport(listOf(runtime)); api.held = CompletableDeferred()
+            val selections = RuntimeSelections(); val selected = selections.bind("a", "t"); selected.saveCatalog(api.saved)
+            var admin = true
+            val detail = RuntimeDetailStore(api, api, this, { true }, { admin }, selected, runtime.id, {})
+            detail.rename("Late"); runCurrent()
+            if (invalidate) selections.clear() else admin = false
+            api.held!!.complete(Unit); advanceUntilIdle()
+            if (invalidate) { assertTrue(selected.catalog.isEmpty()); assertFalse(selected.valid) }
+            else { assertEquals("Saved", selected.catalog.single().label); assertFalse(detail.editable) }
+            assertTrue(selections.bind("new-account", "t").catalog.isEmpty())
+        }
+    }
     @Test fun unauthorizedExpiresButForbiddenKeepsAccount() = runTest {
         for (unauthorized in listOf(false, true)) {
             val api = Transport(listOf(runtime)); val selected = RuntimeSelections().bind("a", "t"); selected.saveCatalog(api.saved)

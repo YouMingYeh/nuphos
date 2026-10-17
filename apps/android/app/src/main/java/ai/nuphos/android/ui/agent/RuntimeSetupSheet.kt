@@ -58,20 +58,19 @@ fun RuntimeSetupSheet(store: RuntimeSetupStore, onDismiss: () -> Unit,
             code = ""; store.close(); lifecycle.removeObserver(observer)
         }
     }
-    LaunchedEffect(state.attempt?.attemptId, state.attempt?.state, state.attemptMismatch, selection.selectedId, selection.selected?.provider, selection.selected?.status, selection.selected?.kind) { code = ""; browserError = false }
+    LaunchedEffect(store.signInRuntime?.id, state.attempt?.attemptId, state.attempt?.state, state.attemptMismatch, selection.selectedId, selection.selected?.provider, selection.selected?.status, selection.selected?.kind) { code = ""; browserError = false }
     ModalBottomSheet(sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), onDismissRequest = { code = ""; onDismiss() }, properties = ModalBottomSheetProperties(securePolicy = androidx.compose.ui.window.SecureFlagPolicy.SecureOn)) {
         Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (detail != null) {
                 RuntimeDetailPage(detail, quotas[detail.runtimeId], onBack = { detailId = null }, onSignIn = {
-                    store.select(detail.runtimeId)
-                    if (selection.selectedId == detail.runtimeId) { detailId = null; managing = true }
+                    if (store.focusSignIn(detail.runtimeId)) { detailId = null; managing = true }
                 })
             } else {
                 Text(if (managing) "Manage Agents" else "Choose an Agent", style = MaterialTheme.typography.headlineSmall)
                 if (!managing) Text("Choose an Agent for new chats. Existing chats keep their current Agent. Provider sign-in may still be required.",
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (managing) TextButton(onClick = { code = ""; browserError = false; managing = false }) { Text("Back to Agents") }
+                    if (managing) TextButton(onClick = { code = ""; browserError = false; store.clearSignInFocus(); managing = false }) { Text("Back to Agents") }
                     else if (store.canAdminister) OutlinedButton(onClick = { code = ""; browserError = false; managing = true }) { Text("Manage Agents") }
                     TextButton(onClick = { code = ""; onDismiss() }) { Text("Done") }
                 }
@@ -128,12 +127,12 @@ fun RuntimeSetupSheet(store: RuntimeSetupStore, onDismiss: () -> Unit,
                     if (state.catalogLoaded && selection.catalog.isEmpty()) Text("No saved Agents.")
                     OutlinedButton(onClick = { store.refresh() }, enabled = !state.busy) { Text("Refresh Agents") }
                 } else {
-                    selection.selected?.let { selected ->
-                        Text("Selected Agent", style = MaterialTheme.typography.titleSmall,
+                    store.signInRuntime?.let { selected ->
+                        Text("Agent sign-in", style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(selected.label, style = MaterialTheme.typography.titleMedium)
                     }
-                    OutlinedButton(onClick = { code = ""; browserError = false; managing = false }) { Text("Change Agent") }
+                    OutlinedButton(onClick = { code = ""; browserError = false; store.clearSignInFocus(); managing = false }) { Text("Change Agent") }
                     if (store.canAdminister) {
                         HorizontalDivider(Modifier.padding(vertical = 8.dp))
                         Text("Managed Agent", style = MaterialTheme.typography.titleMedium)
@@ -149,10 +148,10 @@ fun RuntimeSetupSheet(store: RuntimeSetupStore, onDismiss: () -> Unit,
                             Text("Creation is unconfirmed. Closing does not undo a saved Agent.")
                             OutlinedButton(onClick = store::confirmCreateReviewed, enabled = !state.busy && state.catalogLoaded) { Text("I reviewed saved Agents") }
                         }
-                        if (selection.selected?.kind in setOf("managed", "external")) {
+                        if (store.signInRuntime?.kind in setOf("managed", "external")) {
                             Button(onClick = store::startLogin, enabled = !state.busy && !selection.loginReview) { Text("Start provider sign-in") }
                             if (selection.loginReview) {
-                                if (selection.loginRuntimeId != selection.selectedId) Text("Another Agent has an unconfirmed sign-in. Select that Agent and refresh its sign-in before starting another.")
+                                if (selection.loginRuntimeId != store.signInRuntime?.id) Text("Another Agent has an unconfirmed sign-in. Select that Agent and refresh its sign-in before starting another.")
                                 val attempt = state.attempt
                                 Text("Sign-in: ${attempt?.state ?: "unconfirmed"}")
                                 OutlinedButton(onClick = store::refreshLogin, enabled = !state.busy) { Text("Refresh sign-in") }
@@ -177,7 +176,7 @@ fun RuntimeSetupSheet(store: RuntimeSetupStore, onDismiss: () -> Unit,
                                 OutlinedButton(onClick = { code = ""; store.cancelLogin() }, enabled = !state.busy && state.loginReconciled && !state.attemptMismatch && attempt?.pending == true && attempt.valid(System.currentTimeMillis())) { Text("Cancel sign-in") }
                                 if (attempt != null && !attempt.pending) OutlinedButton(onClick = store::confirmLoginRestart, enabled = !state.busy && state.loginReconciled && !state.attemptMismatch) { Text("Review and allow a new sign-in") }
                             }
-                        } else if (selection.selected != null) Text("Provider setup for self-hosted Agents is not available here.")
+                        } else if (store.signInRuntime != null) Text("Provider setup for self-hosted Agents is not available here.")
                     } else Text("Only a current workspace administrator can create Agents or manage provider sign-in.")
                     Text("Closing this sheet stops local polling. It does not cancel server sign-in.")
                     TextButton(onClick = { code = ""; onDismiss() }) { Text("Close") }

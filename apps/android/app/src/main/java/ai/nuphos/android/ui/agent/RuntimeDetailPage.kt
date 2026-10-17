@@ -6,6 +6,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import ai.nuphos.android.data.RuntimeQuota
 import ai.nuphos.android.session.RuntimeDetailStore
 
@@ -15,6 +17,9 @@ fun RuntimeDetailPage(store: RuntimeDetailStore, quota: RuntimeQuota?, onBack: (
     val runtime = store.runtime
     var name by remember(store, runtime?.label) { mutableStateOf(runtime?.label.orEmpty()) }
     var confirmRemoval by remember(store) { mutableStateOf(false) }
+    LaunchedEffect(store.editable, runtime?.label, runtime?.kind) {
+        if (!store.editable) confirmRemoval = false
+    }
     DisposableEffect(store) { onDispose { store.close() } }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextButton(onClick = onBack) { Text("Back to Agents") }
@@ -38,7 +43,7 @@ fun RuntimeDetailPage(store: RuntimeDetailStore, quota: RuntimeQuota?, onBack: (
                     OutlinedButton(onClick = onSignIn, enabled = store.editable) { Text("Sign In Again") }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Enabled")
-                    Switch(checked = runtime.status == "active", onCheckedChange = store::setEnabled, enabled = store.editable)
+                    Switch(modifier = Modifier.semantics { contentDescription = "Enabled" }, checked = runtime.status == "active", onCheckedChange = store::setEnabled, enabled = store.editable)
                 }
                 if (runtime.status != "active") Text("Enable this Agent before signing in.")
                 TextButton(onClick = { confirmRemoval = true }, enabled = store.editable,
