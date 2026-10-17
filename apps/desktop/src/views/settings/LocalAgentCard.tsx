@@ -10,11 +10,11 @@ import { LocalAgentSignIn } from './LocalAgentSignIn'
 import { STATUS_DOT } from './runtimePresentation'
 
 import type { RuntimeStatusTone } from './runtimePresentation'
-import type { AgentCliStatus, DevBundleHint, LocalAgentProvider, LocalAgentState } from '../../api'
+import type { AgentCliStatus, CliLoginProvider, DevBundleHint, LocalAgentState } from '../../api'
 
 export const LOCAL_AGENT_CARD = 'rounded-lg border border-zGray-800/70 bg-surface'
 
-const AGENT: Record<LocalAgentProvider, { name: string; install: string; connectors: string }> = {
+const AGENT: Record<CliLoginProvider, { name: string; install: string; connectors: string }> = {
   'claude-code': {
     name: 'Claude Code',
     install: 'curl -fsSL https://claude.ai/install.sh | bash',
@@ -47,7 +47,7 @@ function Code({ children }: { children: string }) {
 }
 
 /** Shown only when a newer release exists; the update itself is shared with every agent selector. */
-function UpdateButton({ provider }: { provider: LocalAgentProvider }) {
+function UpdateButton({ provider }: { provider: CliLoginProvider }) {
   const { version, updating, start } = useLocalAgentUpdate(provider)
 
   if (!version && !updating) return null
@@ -70,7 +70,7 @@ function CliStatus({
   provider,
   cli,
 }: {
-  provider: LocalAgentProvider
+  provider: CliLoginProvider
   cli: AgentCliStatus | null
 }) {
   const agent = AGENT[provider]
@@ -116,7 +116,7 @@ export function LocalAgentCard({
   devBundle,
   onCheck,
 }: {
-  provider: LocalAgentProvider
+  provider: CliLoginProvider
   agent: LocalAgentState
   devBundle?: DevBundleHint
   onCheck: () => void
