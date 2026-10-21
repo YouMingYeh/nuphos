@@ -169,13 +169,13 @@ fun LoginScreen(modifier: Modifier = Modifier) {
                     Spacer(Modifier.size(10.dp))
                 }
                 Text(
-                    if (busy) stringResource(R.string.signing_in) else if (passwordMode) "Sign in with password" else stringResource(R.string.sign_in),
+                    if (busy) stringResource(R.string.signing_in) else if (passwordMode) "Sign in with password" else "Continue with Google or Apple",
                     style = MaterialTheme.typography.titleMedium,
                 )
             }
             androidx.compose.material3.TextButton(
                 onClick = { passwordMode = !passwordMode; password = "" }, enabled = !busy,
-            ) { Text(if (passwordMode) "Continue with Google" else "Use a password") }
+            ) { Text(if (passwordMode) "Continue with Google or Apple" else "Use a password") }
             if (!passwordMode) Text(
                 stringResource(R.string.sign_in_hint),
                 modifier = Modifier.padding(top = 14.dp, bottom = 8.dp),
