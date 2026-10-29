@@ -48,6 +48,20 @@ export const teamApi = {
     ipcRenderer.invoke('arch:saveDiagram', teamId, diagramId, patch),
   archDeleteDiagram: (teamId: string, diagramId: string) =>
     ipcRenderer.invoke('arch:deleteDiagram', teamId, diagramId),
+  // --- Designs ---
+  designsList: (teamId: string) => ipcRenderer.invoke('designs:list', teamId),
+  designsStamp: (teamId: string, designId: string) =>
+    ipcRenderer.invoke('designs:stamp', teamId, designId),
+  designsGet: (teamId: string, designId: string) =>
+    ipcRenderer.invoke('designs:get', teamId, designId),
+  designsCreate: (teamId: string, input: unknown) =>
+    ipcRenderer.invoke('designs:create', teamId, input),
+  designsReplace: (teamId: string, designId: string, patch: unknown) =>
+    ipcRenderer.invoke('designs:replace', teamId, designId, patch),
+  designsApplyOps: (teamId: string, designId: string, ops: unknown) =>
+    ipcRenderer.invoke('designs:applyOps', teamId, designId, ops),
+  designsDelete: (teamId: string, designId: string) =>
+    ipcRenderer.invoke('designs:delete', teamId, designId),
   // --- Dashboards ---
   dashboardsList: (teamId: string) => ipcRenderer.invoke('dashboards:list', teamId),
   dashboardsCreate: (teamId: string, input: unknown) =>

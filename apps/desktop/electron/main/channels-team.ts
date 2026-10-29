@@ -2,6 +2,7 @@ import * as atlas from '../atlas'
 import * as discordInstall from '../discord-install'
 import * as slackInstall from '../slack-install'
 
+import { designChannels } from './channels-designs'
 import { skillChannels } from './channels-skills'
 
 import type { DashboardViewRange } from '../../src/dashboards/schema'
@@ -180,6 +181,7 @@ export const teamChannels = {
   'dashboards:deleteAlert': (_e: unknown, teamId: string, dashboardId: string, panelId: string) =>
     atlas.dashboardsDeleteAlert(teamId, dashboardId, panelId),
   ...skillChannels,
+  ...designChannels,
   'atlas:createTeam': (_e: unknown, name: string) => atlas.createTeam(name),
   'atlas:updateTeam': (_e: unknown, teamId: string, input: { name: string }) =>
     atlas.updateTeam(teamId, input),

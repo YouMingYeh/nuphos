@@ -9,6 +9,7 @@ import type {
 } from './app-types.ts'
 import type { SkillScope } from './plan-types.ts'
 import type { Diagram } from '../architecture/schema.ts'
+import type { DesignOp, DesignPage } from '../design/schema.ts'
 import type { DashboardViewRange } from '../dashboards/schema'
 import type { ConnectAgentLink } from '../lib/connectAgentLink.ts'
 import type {
@@ -95,6 +96,20 @@ export const appApi = {
   ) => window.api.archSaveDiagram(teamId, diagramId, patch),
   archDeleteDiagram: (teamId: string, diagramId: string) =>
     window.api.archDeleteDiagram(teamId, diagramId),
+  designsList: (teamId: string) => window.api.designsList(teamId),
+  designsStamp: (teamId: string, designId: string) => window.api.designsStamp(teamId, designId),
+  designsGet: (teamId: string, designId: string) => window.api.designsGet(teamId, designId),
+  designsCreate: (teamId: string, input: { name?: string; pages?: DesignPage[] }) =>
+    window.api.designsCreate(teamId, input),
+  designsReplace: (
+    teamId: string,
+    designId: string,
+    /** Replacing `pages` needs the `updatedAt` last read; a mismatch is a 409. */
+    patch: { name?: string; pages?: DesignPage[]; updatedAt?: string },
+  ) => window.api.designsReplace(teamId, designId, patch),
+  designsApplyOps: (teamId: string, designId: string, ops: DesignOp[]) =>
+    window.api.designsApplyOps(teamId, designId, ops),
+  designsDelete: (teamId: string, designId: string) => window.api.designsDelete(teamId, designId),
   dashboardsList: (teamId: string) => window.api.dashboardsList(teamId),
   dashboardsCreate: (teamId: string, input: import('../dashboards/schema').CreateDashboardInput) =>
     window.api.dashboardsCreate(teamId, input),

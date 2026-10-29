@@ -20,6 +20,7 @@ import { cloudflareAccountsRoutes } from '@/routes/cloudflare-accounts'
 import { teamClusters } from '@/routes/clusters'
 import { nuphosDashboardsRoutes } from '@/routes/dashboards'
 import { databaseConnectionsRoutes } from '@/routes/database-connections'
+import { designsRoutes } from '@/routes/designs'
 import { discordAgentRoutes } from '@/routes/discord-agent'
 import { discordInstallationsRoutes } from '@/routes/discord-installations'
 import { fileTransfersRoutes } from '@/routes/file-transfers'
@@ -140,6 +141,7 @@ teamScoped.route('/azure-accounts', azureAccountsRoutes)
 teamScoped.route('/huawei-accounts', huaweiAccountsRoutes)
 teamScoped.route('/grafana-instances', grafanaInstancesRoutes)
 teamScoped.route('/architecture-diagrams', architectureDiagramsRoutes)
+teamScoped.route('/designs', designsRoutes)
 teamScoped.route('/dashboards', nuphosDashboardsRoutes)
 // Alias for desktop builds that predate the Dashboards rename.
 teamScoped.route('/cost-dashboards', nuphosDashboardsRoutes)

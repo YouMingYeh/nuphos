@@ -10,6 +10,7 @@ import {
   databaseMetricSamples,
   databaseQueryAudits,
 } from '@/models/database'
+import { designs } from '@/models/designs'
 import {
   architectureDiagrams,
   fileTransferGroups,
@@ -180,6 +181,7 @@ export async function setupCoreIndexes(): Promise<void> {
     },
   )
   await architectureDiagrams().createIndex({ teamId: 1 }, { background: true })
+  await designs().createIndex({ teamId: 1, updatedAt: -1 }, { background: true })
   // ---- Dashboards (collections keep their cost_* names) ----
   await nuphosDashboards().createIndex({ teamId: 1, updatedAt: -1 }, { background: true })
   await nuphosDashboards().createIndex(

@@ -56,6 +56,7 @@ const CANONICAL_ROUTES: { method: string; path: RegExp }[] = [
   { method: 'GET', path: /^\/personal-credentials\/[^/]+\/token$/u },
   { method: '*', path: /^\/(?:cost-)?dashboards(?:\/|$)/u },
   { method: '*', path: /^\/architecture-diagrams(?:\/|$)/u },
+  { method: '*', path: /^\/designs(?:\/|$)/u },
   { method: '*', path: /^\/agent-triggers(?:\/|$)/u },
   { method: '*', path: /^\/knowledge(?:\/|$)/u },
   { method: '*', path: /^\/instructions(?:\/|$)/u },
