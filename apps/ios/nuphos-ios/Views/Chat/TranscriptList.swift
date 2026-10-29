@@ -204,7 +204,9 @@ final class TranscriptController: UIViewController, UICollectionViewDelegate, Ch
         let size = collection.bounds.size
         guard size.width > 0, size.height > 0, size != previousSize else { return }
         previousSize = size
-        if !positioned || following {
+        // Never under a finger or a fling: on iPhone Duo the header resizes the
+        // transcript mid-gesture, and moving it then fights the reader.
+        if !positioned || (following && !collection.isDragging && !collection.isDecelerating) {
             // Inside the keyboard's animation, so the rows travel with it. A
             // rotation moves them straight to their new layout instead.
             if root.rotating { UIView.performWithoutAnimation(positionAtEnd) } else { positionAtEnd() }
