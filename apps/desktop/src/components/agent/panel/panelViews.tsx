@@ -22,6 +22,7 @@ import { DelayedPanelReveal } from './homeAnimation'
 import { canEditMessage } from './messageEdit'
 import { AuthorizationActionContext } from './parts'
 import { waitingMessages } from './queuedAutoSend'
+import { useQueuedShareApproval } from './queuedShareApproval'
 import { QueuedStrip } from './QueuedStrip'
 import { cardReplyId } from './replyTarget'
 import { ReplyTargetChip } from './ReplyTargetChip'
@@ -66,7 +67,8 @@ export function PanelConversationPage({ c }: { c: PanelViewCtx }) {
     variant,
     visibleConversationCredentialSelector,
   } = c
-  const { runtimeControl } = useConversationRuntimeControl(c)
+  const { runtimeControl: conversationControl } = useConversationRuntimeControl(c)
+  const { runtimeControl, queuedApproval } = useQueuedShareApproval(conversationControl, activeTab)
   // The fork needs the chat stored on the server; each message is then gated on its author.
   const editableSessionId =
     activeTab && !activeTab.readOnly && !activeTab.unsaved ? activeTab.sessionId : undefined
@@ -211,6 +213,7 @@ export function PanelConversationPage({ c }: { c: PanelViewCtx }) {
               {waitingMessages(activeTab).length > 0 && (
                 <QueuedStrip
                   items={waitingMessages(activeTab)}
+                  approval={queuedApproval}
                   canSteer={runtimeAllows(activeTab.runtimeState, 'steer')}
                   onRemove={(queuedId) => void removeQueued(activeTab.id, queuedId)}
                   onSteer={(queuedId) => void steerQueued(activeTab.id, queuedId)}
