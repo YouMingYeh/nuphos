@@ -95,3 +95,13 @@ mocked tests.
 - Android: `./gradlew testDebugUnitTest lintDebug assembleDebug` (requires Java/Android SDK)
 - CLI: `cargo check --locked`
 - Repository: `bun run check:cycles`, `bun run format:check`
+
+## Review screenshots
+
+Captured locally from the actual desktop `LoginView` component (with the Electron API stubbed) and the backend chooser response; these show the sign-in surfaces, not a live provider round trip.
+
+![Desktop sign-in entry](../images/social-login/desktop-entry.png)
+
+![Backend provider chooser](../images/social-login/provider-chooser.png)
+
+Browser sign-ins use the same revocable server-side sessions and new-sign-in alerts as other authentication methods. Native callbacks create no session until the client redeems its one-time delivery code with PKCE.

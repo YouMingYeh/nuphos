@@ -6,7 +6,6 @@ import { config } from '@/config'
 import { AppError } from '@/lib/errors'
 import { uniqueUsername } from '@/lib/identity/auth'
 import { mapUser, users } from '@/lib/identity/shared'
-import { signNuphosToken } from '@/lib/identity/token'
 import { safeEqualStr } from '@/lib/oauth/tokens'
 
 import type { webcrypto } from 'node:crypto'
@@ -230,5 +229,5 @@ export async function signInSocial(provider: SocialProvider, claims: SocialClaim
     }
   }
 
-  return { token: signNuphosToken(user._id), user: mapUser(user) }
+  return { user: mapUser(user) }
 }
