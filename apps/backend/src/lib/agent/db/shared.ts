@@ -3,6 +3,7 @@ import { tokenTeamFilter } from '@/lib/identity/token-team-scope'
 
 import type { SessionResource } from '../session-resources'
 import type { GeneralAccess } from './access'
+import type { ConversationInputRequests } from './pending-decision'
 import type { ConversationTimelineEvent } from './timeline-events'
 import type { MessageMetadata } from '@/lib/agent/message-metadata'
 import type { AgentMessageOrigin } from '@/lib/agent/message-origin'
@@ -20,8 +21,8 @@ export type ConversationPreviewAttachment = {
    *  getConversationPreviewAttachment reads it, and it answers "no session". */
   forceNew?: boolean
   runtimeDefaults?: RuntimeDefaults
-  /** Last model settings the runtime confirmed for this session; shown while
-   *  the live session cannot answer (busy, dormant, offline). */
+  /** Last model settings this session confirmed; they override runtimeDefaults
+   *  on the chip and when the session is recreated (see storedPick). */
   sessionConfig?: SessionConfigOption[]
   openabSessionId: string
   runtimeUrl: string
@@ -44,8 +45,7 @@ export function liveAttachment(
   return !attachment || attachment.forceNew ? null : attachment
 }
 
-// Per-turn desktop context the Claude Code runtime's MCP calls cannot carry
-// themselves (they only know the conversation id).
+// Desktop context MCP calls cannot carry themselves (they only know the conversation id).
 export type ConversationPreviewContext = {
   diagramId?: string
   kubeContext?: string
@@ -63,7 +63,7 @@ export type ConversationPreviewContext = {
 
 export type { ConversationTimelineEvent }
 
-export type AgentConversation = {
+export type AgentConversation = ConversationInputRequests & {
   _id?: ObjectId
   sessionId: string // Frontend-generated UUID
   userId: string // Nuphos user id
@@ -71,6 +71,8 @@ export type AgentConversation = {
   linkedResources?: SessionResource[]
   titleManuallySet?: boolean
   title: string
+  /** Bot avatar picked by the owner or a manager, e.g. `05-rembrandt`. Absent = derived from sessionId. */
+  avatar?: string
   firstMessage: string
   messageCount: number
   transcriptUpdatedAt?: Date
@@ -124,6 +126,7 @@ export type AgentConversation = {
     movedAt: Date
     movedBy: string
   }
+  runtimeFallback?: { failed: string[]; at: Date } // Agents a turn failed on, skipped for an hour
   // Claude Code preview attachment: which OpenAB session carries this
   // conversation, on which runtime endpoint. Durable so any backend replica
   // reattaches to the same inner session instead of forking a new one.

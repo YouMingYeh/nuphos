@@ -4,6 +4,7 @@ import { navigationFromAppPath } from '../../lib/appRoutes'
 import { HREF_FAVORITE_PREFIX } from '../../lib/sidebarFavorites'
 import { teamOverviewNavItemFor } from '../../lib/teamOverviewNav'
 
+import type { HistoryTimeline } from './historyRows'
 import type { Scope, TeamInvitation, UserInfo } from '../../types'
 import type { BreadcrumbSegment } from '../Toolbar'
 import type { LucideIcon } from 'lucide-react'
@@ -21,7 +22,7 @@ export type Item = {
   badge?: number
   /** Status content preserved when the item is pinned. */
   trailing?: ReactNode
-  /** Row actions omitted from pinned favorites. */
+  /** Row actions shown on hover or focus, such as a chat's More button. */
   actions?: ReactNode
   /** Overrides the default onSelect(key) click behavior (Favorites rows).
    *  `newTab` is true for a cmd/ctrl-click. */
@@ -38,6 +39,8 @@ export type Item = {
   watching?: boolean
   /** This row's activity, shown on its parent while the parent is folded. */
   foldedStatus?: ReactNode
+  /** A finished thread with nothing left to show; its parent counts it instead. */
+  finished?: boolean
 }
 
 export type Section = {
@@ -163,6 +166,8 @@ export type SidebarProps = {
   }
   canGoBack?: boolean
   canGoForward?: boolean
+  /** The main pane's timeline, for the Back/Forward history menu. */
+  history?: HistoryTimeline
   onBack?: () => void
   onForward?: () => void
   /** Go up one navigation level (parent scope). Absent at the team root. */
@@ -195,4 +200,6 @@ export type SidebarProps = {
   onToggleCollapse?: () => void
   /** Restore scope-specific resource navigation while the workspace is expanded. */
   dynamicNavigation?: boolean
+  /** ⌥↑ / ⌥↓ switch agents only while no overlay (Settings, search, …) covers the workspace. */
+  chatNavKeysLive?: boolean
 }

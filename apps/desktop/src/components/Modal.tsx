@@ -3,7 +3,10 @@ import { X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+import { t } from '../i18n'
 import { cssDurationMs } from '../lib/motion'
+
+import { useModalFocus } from './modalFocus'
 
 import type { ReactNode } from 'react'
 
@@ -76,6 +79,8 @@ export function Modal({
   if (open && !mounted) setMounted(true)
   if (!open && shown) setShown(false)
 
+  const { panelRef, bodyRef, titleId } = useModalFocus(open)
+
   useEffect(() => {
     if (open) {
       // Double rAF: the first frame commits the initial `shown=false` styles;
@@ -93,9 +98,9 @@ export function Modal({
       }
     }
     // The panel's `.t-modal` close transition runs on --modal-close-dur.
-    const t = setTimeout(() => setMounted(false), cssDurationMs('--modal-close-dur', 150))
+    const timer = setTimeout(() => setMounted(false), cssDurationMs('--modal-close-dur', 150))
 
-    return () => clearTimeout(t)
+    return () => clearTimeout(timer)
   }, [open])
 
   useEffect(() => {
@@ -139,9 +144,14 @@ export function Modal({
         )}
       />
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         style={{ width }}
         className={clsx(
-          'titlebar-no-drag relative isolate z-10 flex flex-col overflow-hidden border shadow-2xl',
+          'titlebar-no-drag relative isolate z-10 flex flex-col overflow-hidden border shadow-2xl outline-none',
           isPrompt ? 'rounded-[20px]' : 'rounded-xl',
           fillHeight ? 'h-[80vh]' : 'max-h-[80vh]',
           't-modal',
@@ -164,6 +174,7 @@ export function Modal({
         >
           <div className="min-w-0">
             <div
+              id={titleId}
               className={clsx(
                 isPrompt
                   ? 'text-xl font-semibold tracking-tight'
@@ -197,7 +208,7 @@ export function Modal({
           {headerActions}
           <button
             type="button"
-            aria-label="Close modal"
+            aria-label={t('Close modal')}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={onClose}
             className={clsx(
@@ -213,7 +224,10 @@ export function Modal({
         {/* min-h-0 lets this flex child shrink below its content and actually
             scroll internally, instead of forcing the column taller than 80vh
             and squeezing the header above. */}
-        <div className="titlebar-no-drag relative z-0 min-h-0 flex-1 overflow-auto scrollbar-thin">
+        <div
+          ref={bodyRef}
+          className="titlebar-no-drag relative z-0 min-h-0 flex-1 overflow-auto scrollbar-thin"
+        >
           {children}
         </div>
         {footer && (

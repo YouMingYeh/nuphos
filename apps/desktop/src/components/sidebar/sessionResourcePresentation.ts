@@ -1,10 +1,14 @@
+import { locale, t } from '../../i18n/index.ts'
+
 import type { SessionResource } from '../../api/session-resource-types'
+import type { ChangesFilter } from '../../lib/chatSummaryPanel'
 import type { TerminalProcess } from '../../lib/sessionTerminalProcesses'
 
 export type ResourceChip =
   | { kind: 'resource'; key: string; resource: SessionResource }
   | { kind: 'terminal'; key: string; terminal: TerminalProcess }
   | { kind: 'terminals'; key: string; terminals: TerminalProcess[] }
+  | { kind: 'finished'; key: string; resources: SessionResource[] }
 
 /** What a chip says: a PR number, a thread's title, or an issue's identifier. */
 export function resourceLabel(resource: SessionResource): string {
@@ -12,6 +16,70 @@ export function resourceLabel(resource: SessionResource): string {
   if (resource.provider === 'slack' || resource.provider === 'discord') return resource.title
 
   return resource.title.split(/\s+/, 1)[0]
+}
+
+const HEALTH_TEXT = {
+  checks_failed: t('open · checks failing'),
+  changes_requested: t('open · changes requested'),
+  conflict: t('open · merge conflict'),
+}
+
+/** What holds up an open PR. A merged or closed PR's last health no longer applies. */
+export function resourceHealth(resource: SessionResource) {
+  return resource.provider === 'github' && resource.state === 'open'
+    ? (resource.health ?? null)
+    : null
+}
+
+/** A resource's state as a person would say it, e.g. `open · checks failing`. */
+export function resourceStatus(resource: SessionResource): string {
+  const health = resourceHealth(resource)
+
+  return health ? HEALTH_TEXT[health] : resource.state
+}
+
+/** A PR tag's color is its GitHub state alone, as on GitHub: open green, merged purple, closed red. */
+export function pullStateColor(resource: SessionResource) {
+  if (resource.state === 'merged') return 'session-resource-merged'
+  if (resource.state === 'closed') return 'session-resource-closed'
+
+  return 'session-resource-open'
+}
+
+/**
+ * Where a pull request or issue stands, as the Changes filter and the merged
+ * badge group them: still open, merged (or a completed issue), or closed
+ * unmerged (or a canceled issue). A chat thread is always open.
+ */
+export type ChangeStatus = 'open' | 'merged' | 'closed'
+
+export function changeStatus(resource: SessionResource): ChangeStatus {
+  if (resource.provider === 'linear') {
+    if (resource.stateType === 'completed') return 'merged'
+
+    return resource.stateType === 'canceled' ? 'closed' : 'open'
+  }
+  if (resource.provider !== 'github') return 'open'
+  if (resource.state === 'merged') return 'merged'
+
+  return resource.state === 'closed' ? 'closed' : 'open'
+}
+
+const HEALTH_MARK = {
+  checks_failed: { glyph: 'cross', color: 'session-resource-failing' },
+  changes_requested: { glyph: 'dot', color: 'session-resource-pending' },
+  conflict: { glyph: 'conflict', color: 'session-resource-pending' },
+} as const
+
+/**
+ * The status mark beside an open PR's tag, kept apart from its state color the
+ * way GitHub shows checks next to a PR: a red cross for failing checks, a
+ * yellow dot for requested changes, a conflict marker for a conflict.
+ */
+export function resourceMark(resource: SessionResource) {
+  const health = resourceHealth(resource)
+
+  return health ? HEALTH_MARK[health] : null
 }
 
 /** The whole name, as a list shows it: a PR's number and title, or anything else's title. */
@@ -26,30 +94,121 @@ export function chipNames(chips: ResourceChip[]): string[] {
   return chips.flatMap((chip) => {
     if (chip.kind === 'resource') return [resourceFullLabel(chip.resource)]
     if (chip.kind === 'terminal') return [chip.terminal.name]
+    if (chip.kind === 'finished') return chip.resources.map(resourceFullLabel)
 
     return chip.terminals.map((terminal) => terminal.name)
   })
 }
 
+type FinishedWord = 'merged' | 'done' | 'closed' | 'canceled'
+
+/** How the merged badge names one finished item: a PR merged or closed, an issue done or canceled. */
+function finishedWord(resource: SessionResource): FinishedWord {
+  const merged = changeStatus(resource) === 'merged'
+
+  if (resource.provider === 'linear') return merged ? 'done' : 'canceled'
+
+  return merged ? 'merged' : 'closed'
+}
+
+/** A count of finished items as the badge says it, e.g. `15 merged`. */
+function finishedCount(word: FinishedWord, n: number): string {
+  if (word === 'merged') return n === 1 ? t('1 merged') : t('{n} merged', { n })
+  if (word === 'done') return n === 1 ? t('1 done') : t('{n} done', { n })
+  if (word === 'closed') return n === 1 ? t('1 closed') : t('{n} closed', { n })
+
+  return n === 1 ? t('1 canceled') : t('{n} canceled', { n })
+}
+
 /**
- * One chip per linked resource. Open terminals are interchangeable shells, so
- * two or more share a single chip that lists them, leaving room for the links.
+ * What the merged badge says, the count on the Changes pill it opens: merged
+ * PRs and completed issues as `13 merged` (`2 done` when none is a PR), or
+ * when nothing merged, the closed and canceled ones as `1 closed`.
+ */
+export function finishedLabel(resources: SessionResource[]): string {
+  const merged = resources.filter((resource) => changeStatus(resource) === 'merged')
+
+  if (!merged.length) return finishedCount('closed', resources.length)
+  const word = merged.some((resource) => resource.provider === 'github') ? 'merged' : 'done'
+
+  return finishedCount(word, merged.length)
+}
+
+/**
+ * How the finished items break down, most common first, listed the way the
+ * app's language lists things: `15 merged, 2 closed, 1 done` in English.
+ */
+export function finishedBreakdown(resources: SessionResource[], language: string = locale): string {
+  const counts = new Map<FinishedWord, number>()
+
+  for (const resource of resources) {
+    const word = finishedWord(resource)
+
+    counts.set(word, (counts.get(word) ?? 0) + 1)
+  }
+
+  const items = [...counts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([word, count]) => finishedCount(word, count))
+
+  return new Intl.ListFormat(language, { style: 'narrow', type: 'conjunction' }).format(items)
+}
+
+/** The merged badge's tooltip: its breakdown, then one name per line. */
+export function finishedTooltip(resources: SessionResource[]): string {
+  return [finishedBreakdown(resources), ...resources.map(resourceFullLabel)].join('\n')
+}
+
+/** The Changes filter the merged badge opens: Merged when it holds anything merged, else Closed. */
+export function finishedFilter(resources: SessionResource[]): ChangesFilter {
+  return resources.some((resource) => changeStatus(resource) === 'merged') ? 'merged' : 'closed'
+}
+
+/**
+ * One chip per open linked resource. Open terminals are interchangeable
+ * shells, so two or more share a single chip that lists them, leaving room for
+ * the links. Merged and closed PRs and done or canceled issues are worth
+ * knowing but no longer need attention, so they fold into one quiet badge
+ * last, the first chip to fold into "+N" on a narrow row.
  */
 export function resourceChips(
   resources: SessionResource[],
   terminals: TerminalProcess[],
 ): ResourceChip[] {
-  const chips: ResourceChip[] = resources.map((resource) => ({
-    kind: 'resource',
-    key: resource.id,
-    resource,
-  }))
+  const finished = resources.filter((resource) => changeStatus(resource) !== 'open')
+  const chips: ResourceChip[] = resources
+    .filter((resource) => changeStatus(resource) === 'open')
+    .map((resource) => ({ kind: 'resource', key: resource.id, resource }))
 
   if (terminals.length > 1) chips.push({ kind: 'terminals', key: 'terminals', terminals })
   else if (terminals.length === 1)
     chips.push({ kind: 'terminal', key: terminals[0].tabId, terminal: terminals[0] })
+  if (finished.length) chips.push({ kind: 'finished', key: 'finished', resources: finished })
 
   return chips
+}
+
+/**
+ * The "+N" chip's accessible name, from what it folds: other links and
+ * terminals by count, and the merged badge by its own label, e.g.
+ * `3 more linked resources and 15 merged, show all`. Its visible text stays a
+ * count of chips, so a folded badge adds one.
+ */
+export function overflowLabel(hidden: ResourceChip[]): string {
+  const n = chipNames(hidden.filter((chip) => chip.kind !== 'finished')).length
+  const finished = hidden.find((chip) => chip.kind === 'finished')
+
+  if (!finished)
+    return n === 1
+      ? t('1 more linked resource, show all')
+      : t('{n} more linked resources, show all', { n })
+  const badge = finishedLabel(finished.resources)
+
+  if (!n) return t('{badge}, show all', { badge })
+
+  return n === 1
+    ? t('1 more linked resource and {badge}, show all', { badge })
+    : t('{n} more linked resources and {badge}, show all', { n, badge })
 }
 
 /**

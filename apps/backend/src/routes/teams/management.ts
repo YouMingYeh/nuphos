@@ -2,7 +2,7 @@ import { ObjectId } from 'mongodb'
 import { z } from 'zod'
 
 import { revokeTeamBoxStreams } from '@/lib/agent/devices/box-access'
-import { dropFromTeamBoxAccess } from '@/lib/agent/devices/store'
+import { revokeTeamMemberAccess } from '@/lib/agent/devices/local-share-revoke'
 import { OPENAB_PROVIDERS } from '@/lib/claude-code-preview/runtime-provider'
 import { extractEmailDomain, isPublicEmailDomain } from '@/lib/email-domains'
 import { AppError } from '@/lib/errors'
@@ -17,21 +17,23 @@ import {
   updateTeam,
   updateTeamMemberRole,
 } from '@/lib/identity'
+import { setTeamAvatar } from '@/lib/identity/avatar-upload'
 import { zv } from '@/lib/validate'
 import { requireTeamRole } from '@/middleware/auth'
+import { avatarBodyLimit } from '@/routes/auth'
 
+import type { NuphosTeam } from '@/lib/identity/types'
 import type { TeamAuthVariables } from '@/middleware/auth'
-import type { Hono } from 'hono'
+import type { Context, Hono } from 'hono'
 
 const updateTeamSchema = z
   .object({
-    name: z.string().trim().min(1).max(80).optional(),
-    avatarUrl: z.string().trim().max(2048).optional(),
+    name: z.string().trim().min(1).max(80),
+    // Older Desktop builds resend the icon URL they loaded. The icon is set
+    // by uploading it to /avatar, so the field is accepted and ignored.
+    avatarUrl: z.string().optional(),
   })
   .strict()
-  .refine((value) => value.name !== undefined || value.avatarUrl !== undefined, {
-    message: 'At least one field is required',
-  })
 
 const updateTeamMemberRoleSchema = z
   .object({
@@ -57,16 +59,16 @@ const updateAgentRuntimeSchema = z
   })
   .strict()
 
+/** The team as its routes return it, or a 404 when the update found no team. */
+function teamJson(c: Context<{ Variables: TeamAuthVariables }>, team: NuphosTeam | null) {
+  if (!team) throw new AppError(404, 'team_not_found', 'Team not found')
+
+  return c.json({ ...team, isOwner: team.ownerID === c.get('userId'), role: c.get('teamRole') })
+}
+
 export function registerTeamManagementRoutes(teamScoped: Hono<{ Variables: TeamAuthVariables }>) {
   teamScoped.get('/', (c) => {
-    const team = c.get('team')
-    const userId = c.get('userId')
-
-    return c.json({
-      ...team,
-      isOwner: team.ownerID === userId,
-      role: c.get('teamRole'),
-    })
+    return teamJson(c, c.get('team'))
   })
 
   teamScoped.patch(
@@ -74,20 +76,29 @@ export function registerTeamManagementRoutes(teamScoped: Hono<{ Variables: TeamA
     requireTeamRole('ADMINISTRATOR', 'EDITOR'),
     zv('json', updateTeamSchema),
     async (c) => {
-      const input = c.req.valid('json')
-      const team = await updateTeam(c.get('teamId'), c.get('userId'), input)
+      const { name } = c.req.valid('json')
+      const team = await updateTeam(c.get('teamId'), c.get('userId'), { name })
 
-      if (!team) {
-        throw new AppError(404, 'team_not_found', 'Team not found')
-      }
-
-      return c.json({
-        ...team,
-        isOwner: team.ownerID === c.get('userId'),
-        role: c.get('teamRole'),
-      })
+      return teamJson(c, team)
     },
   )
+
+  teamScoped.put(
+    '/avatar',
+    requireTeamRole('ADMINISTRATOR', 'EDITOR'),
+    avatarBodyLimit,
+    async (c) => {
+      const team = await setTeamAvatar(c.get('teamId'), new Uint8Array(await c.req.arrayBuffer()))
+
+      return teamJson(c, team)
+    },
+  )
+
+  teamScoped.delete('/avatar', requireTeamRole('ADMINISTRATOR', 'EDITOR'), async (c) => {
+    const team = await setTeamAvatar(c.get('teamId'), null)
+
+    return teamJson(c, team)
+  })
 
   teamScoped.put(
     '/agent-runtime',
@@ -97,15 +108,7 @@ export function registerTeamManagementRoutes(teamScoped: Hono<{ Variables: TeamA
       const { runtime } = c.req.valid('json')
       const team = await setTeamAgentRuntime(c.get('teamId'), runtime)
 
-      if (!team) {
-        throw new AppError(404, 'team_not_found', 'Team not found')
-      }
-
-      return c.json({
-        ...team,
-        isOwner: team.ownerID === c.get('userId'),
-        role: c.get('teamRole'),
-      })
+      return teamJson(c, team)
     },
   )
 
@@ -137,15 +140,7 @@ export function registerTeamManagementRoutes(teamScoped: Hono<{ Variables: TeamA
       }
       const team = await setTeamAllowedEmailDomains(c.get('teamId'), domains)
 
-      if (!team) {
-        throw new AppError(404, 'team_not_found', 'Team not found')
-      }
-
-      return c.json({
-        ...team,
-        isOwner: team.ownerID === c.get('userId'),
-        role: c.get('teamRole'),
-      })
+      return teamJson(c, team)
     },
   )
 
@@ -213,8 +208,7 @@ export function registerTeamManagementRoutes(teamScoped: Hono<{ Variables: TeamA
     const result = await removeUserFromTeam(c.get('teamId'), memberId, c.get('userId'))
 
     if (result === 'removed') {
-      await revokeTeamBoxStreams(c.get('teamId'), memberId)
-      await dropFromTeamBoxAccess(c.get('teamId'), memberId)
+      await revokeTeamMemberAccess(c.get('teamId'), memberId)
 
       return c.body(null, 204)
     }
@@ -276,8 +270,7 @@ export function registerTeamManagementRoutes(teamScoped: Hono<{ Variables: TeamA
     const result = await leaveTeam(c.get('teamId'), c.get('userId'))
 
     if (result === 'left') {
-      await revokeTeamBoxStreams(c.get('teamId'), c.get('userId'))
-      await dropFromTeamBoxAccess(c.get('teamId'), c.get('userId'))
+      await revokeTeamMemberAccess(c.get('teamId'), c.get('userId'))
 
       return c.body(null, 204)
     }

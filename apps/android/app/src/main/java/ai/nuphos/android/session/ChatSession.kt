@@ -39,7 +39,7 @@ class ChatSession(
     private val token: String,
     val teamId: String,
     val sessionId: String = UUID.randomUUID().toString().lowercase(),
-    title: String = "New chat",
+    title: String = "New agent",
     private val transfers: AttachmentTransfers = AttachmentTransfers(),
     val browsingOnly: Boolean = false,
     private val readDetail: suspend (String, String, String) -> AgentConversationDetail = NuphosApi::conversationDetail,
@@ -47,6 +47,7 @@ class ChatSession(
     val creationRuntimeBinding: ai.nuphos.android.data.RuntimeBinding? = null,
     private val moveRuntime: suspend (String, String, String, ai.nuphos.android.data.AgentRuntime, String?) -> ai.nuphos.android.data.RuntimeBinding = ai.nuphos.android.data.ConversationRuntimeApi::move,
     private val steerRuntime: suspend (String, String, String, String) -> String = RuntimeApi::steer,
+    private val readBypass: suspend (String, String) -> Boolean = AgentChatApi::bypass,
 ) {
     private var initialModelPick: Map<String, String>? = null
     fun presetModelSettings(pick: Map<String, String>) { initialModelPick = pick.takeIf { it.isNotEmpty() } }
@@ -84,6 +85,24 @@ class ChatSession(
     val linkedResources = SessionResourcesStore { NuphosApi.sessionResources(token, teamId, sessionId) }
     suspend fun refreshResources() = linkedResources.refresh { hasAiAccess && loaded && loadError == null }
     val canReadAttachments get() = hasAiAccess
+    var downloads by mutableStateOf<List<ai.nuphos.android.data.TransferDownloadGroup>>(emptyList())
+        private set
+    var downloadsError by mutableStateOf<String?>(null)
+        private set
+    var timelineEvents by mutableStateOf<List<AgentConversationDetail.TimelineEvent>>(emptyList())
+        private set
+    val canReadDownloads get() = hasAiAccess && !browsingOnly && loaded && loadError == null && isOwner
+    suspend fun refreshDownloads() {
+        if (!canReadDownloads) { downloads = emptyList(); downloadsError = null; return }
+        val generation = detailLoadGeneration
+        try {
+            val result = ai.nuphos.android.data.TransferDownloads.list(token, teamId, sessionId)
+            if (canReadDownloads && generation == detailLoadGeneration) { downloads = result; downloadsError = null }
+        } catch (error: CancellationException) { throw error }
+        catch (_: Exception) {
+            if (canReadDownloads && generation == detailLoadGeneration) downloadsError = "Could not refresh agent files."
+        }
+    }
 
     suspend fun transferGroup(groupId: String): ai.nuphos.android.data.TransferDownloadGroup {
         check(hasAiAccess) { "Attachment access unavailable" }
@@ -139,7 +158,8 @@ class ChatSession(
         private set
     var turnStartedAt by mutableStateOf<Instant?>(null)
         private set
-    var followsBottom by mutableStateOf(true)
+    var scrollToLatestRevision by mutableStateOf(0)
+        private set
     var permissionMode by mutableStateOf(PermissionMode.Auto)
         private set
     var credentialAccess by mutableStateOf<CredentialSelection?>(null)
@@ -213,8 +233,8 @@ class ChatSession(
         !movingAgent && !submissionPending && !uploadBusy && !runtimeRecoveryRequired && !steeringUnconfirmed && queued.isEmpty()
 
     suspend fun moveAgent(target: ai.nuphos.android.data.AgentRuntime) {
-        check(canMoveAgent) { "Wait for the current response to finish before switching agents." }
-        require(target.selectable && (isOwner || target.kind == "managed")) { "Choose an available agent." }
+        check(canMoveAgent) { "Wait for the current response to finish before switching runtimes." }
+        require(target.selectable && (isOwner || target.kind == "managed")) { "Choose an available runtime." }
         if (target.id == runtimeId) return
         movingAgent = true
         transportGeneration++
@@ -278,6 +298,9 @@ class ChatSession(
         permissionMode = mode
     }
 
+    var draftAccessInvalidated by mutableStateOf(false)
+        private set
+
     suspend fun load() {
         if (!hasAiAccess) return
         recallRows = emptySet()
@@ -294,6 +317,7 @@ class ChatSession(
             baseIndex = detail.messagesFirstIndex ?: 0
             isArchived = detail.archivedAt != null
             readOnly = browsingOnly || (detail.readOnly ?: false)
+            draftAccessInvalidated = readOnly || isArchived
             if (browsingOnly) loadError = null
             detail.title?.takeIf { it.isNotEmpty() }?.let { title = it }
             detail.credentialAccess?.let {
@@ -302,7 +326,7 @@ class ChatSession(
             }
             if (!browsingOnly) scope.launch {
                 if (!hasAiAccess) return@launch
-                runCatching { AgentChatApi.bypass(token, sessionId) }.getOrNull()?.let {
+                runCatching { readBypass(token, sessionId) }.getOrNull()?.let {
                     if (!hasAiAccess) return@launch
                     permissionMode = if (it) PermissionMode.Bypass else PermissionMode.Auto
                 }
@@ -328,6 +352,7 @@ class ChatSession(
             }
         } catch (e: Exception) {
             if (!hasAiAccess || detailGeneration != detailLoadGeneration) return
+            draftAccessInvalidated = e is NuphosApi.Failure.Unauthorized || (e is NuphosApi.Failure.Http && e.code in setOf(403, 404))
             loadError = e.message
             loaded = true
         }
@@ -476,7 +501,7 @@ class ChatSession(
         }
         error = null
         stoppedByUser = false
-        followsBottom = true
+        scrollToLatestRevision += 1
         syncTranscriptNow()
         if (!hasAiAccess) return
         startTurn(TurnOptions(streamId = newId(), resumeReason = if (reply) "runtime-reply" else null, permissionMode = if (wasEmpty) permissionMode.raw else null, initialSessionConfig = if (wasEmpty) initialModelPick else null))
@@ -535,14 +560,14 @@ class ChatSession(
     }
 
     suspend fun approvePlan(planId: String): Plan {
-        check(permissions.writable) { "This conversation is read-only." }
+        check(permissions.writable) { "This agent is read-only." }
         val updated = AgentChatApi.updatePlan(token, teamId, planId, "approved")
         if (updated.status == "approved") send("Approved plan #$planId — please proceed with plan #$planId.")
         return updated
     }
 
     suspend fun rejectPlan(planId: String): Plan {
-        check(permissions.writable) { "This conversation is read-only." }
+        check(permissions.writable) { "This agent is read-only." }
         val updated = AgentChatApi.updatePlan(token, teamId, planId, "rejected")
         send("Rejected the plan — discard it and stop.")
         return updated
@@ -603,6 +628,8 @@ class ChatSession(
         data class Completed(val sawTurnComplete: Boolean, val paused: Paused?) : TurnResult()
         data class Failed(val message: String, val definiteRejection: Boolean = false) : TurnResult()
         data object Aborted : TurnResult()
+        /** The server holds the message in the session queue; the idle poll follows its turn. */
+        data object Queued : TurnResult()
     }
 
     private data class Paused(val reason: String, val detail: JsonValue?) {
@@ -625,6 +652,10 @@ class ChatSession(
                 if (!hasAiAccess) return@launch
                 when (result) {
                     TurnResult.Aborted -> return@launch
+                    TurnResult.Queued -> {
+                        finishTurn(null)
+                        return@launch
+                    }
                     is TurnResult.Failed -> {
                         finishTurn(result.message, result.definiteRejection)
                         return@launch
@@ -733,7 +764,9 @@ class ChatSession(
         if (watchReadRevision == watchRevision) watching = detail.watching
         isArchived = detail.archivedAt != null
         readOnly = browsingOnly || (detail.readOnly ?: false)
+        timelineEvents = detail.timelineEvents
         isOwner = detail.isOwner ?: false
+        if (!isOwner) { downloads = emptyList(); downloadsError = null }
         manages = detail.canManage ?: isOwner
         hasActiveRun = detail.activeRun != null
         canCancelRun = detail.canCancelRun ?: false
@@ -810,7 +843,7 @@ class ChatSession(
                     error = e.message ?: "Steering was rejected. Retry when the runtime permits it."
                 } else {
                     steeringHold = pending
-                    error = "Steering delivery is unconfirmed. Check the conversation before retrying."
+                    error = "Steering delivery is unconfirmed. Check the agent before retrying."
                     reconcileSteeringReceipts()
                 }
             } finally {
@@ -1008,13 +1041,14 @@ class ChatSession(
                 resumeReason = if (firstPost) options.resumeReason else null,
                 permissionMode = options.permissionMode,
                 credentialAccess = credentialAccess?.json,
-                clientCapabilities = mapOf("localTools" to false),
+                clientCapabilities = mapOf("localTools" to false, "serverQueue" to true),
                 runtimeId = if (shouldResume == true) null else outgoingCreationBinding?.runtimeId,
                 agentRuntime = if (shouldResume == true) null else outgoingCreationBinding?.agentRuntime,
                 initialSessionConfig = if (firstPost && !shouldResume) options.initialSessionConfig else null,
             )
             var needsFreshRetry = false
             var terminal = false
+            var queuedByServer = false
             var streamError: Throwable? = null
             try {
                 if (!hasAiAccess) return TurnResult.Aborted
@@ -1033,6 +1067,8 @@ class ChatSession(
                         if (type == "error") {
                             val code = frame["errorCode"]?.stringValue
                             if (code == "stream_unresumable" && sawTurnComplete) return@collect
+                            // Another turn took the runtime mid-start; the server put the message back at the head of the queue.
+                            if (code == "message_queued") { queuedByServer = true; throw Terminal() }
                             lastErrorText = frame["errorText"]?.stringValue ?: "The agent hit an error."
                             needsFreshRetry = true
                             return@collect
@@ -1066,6 +1102,7 @@ class ChatSession(
             }
             val err = streamError
             if (err is CancellationException) return TurnResult.Aborted
+            if (queuedByServer || err is SseClient.Failure.Queued) return TurnResult.Queued
             if (err is SseClient.Failure.BadStatus) {
                 if (pendingSubmission != null && !accepted && err.code >= 500) return TurnResult.Failed("Message delivery is unconfirmed. Resume the original connection.")
                 val conflict = AgentChatApi.conflict(err.code, err.body)
@@ -1345,6 +1382,9 @@ class ChatSession(
 
     /** Revoke local work and unsent copies without cancelling the server run. */
     fun disposeForConsent() {
+        downloads = emptyList()
+        downloadsError = null
+        timelineEvents = emptyList()
         modelScopeActive = false
         resetModelSettings()
         initialModelPick = null

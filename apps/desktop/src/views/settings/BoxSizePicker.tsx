@@ -3,6 +3,10 @@ import { RadioGroup } from '@base-ui/react/radio-group'
 import clsx from 'clsx'
 import { ArrowUpRight, Check, Lock } from 'lucide-react'
 
+import { t } from '../../i18n'
+
+import { sizeGridColumns } from './boxCreatePresentation'
+
 import type { boxSizeChoices } from './boxPresentation'
 
 type Choice = ReturnType<typeof boxSizeChoices>[number]
@@ -14,12 +18,12 @@ const SLAB_FILL: Record<Tone, string> = {
   locked: 'fill-zGray-600',
 }
 
-/** Three stacked slabs, filled from the bottom by rank: one for Small, all three for Large. */
-function SizeGlyph({ rank, tone }: { rank: number; tone: Tone }) {
+/** Three stacked slabs, filled from the bottom by tier: one for Small, two for Medium, three for Large. */
+function SizeGlyph({ tier, tone }: { tier: number; tone: Tone }) {
   return (
     <svg viewBox="0 0 32 32" className="h-8 w-8" aria-hidden="true">
       {[0, 1, 2].map((slab) => {
-        const filled = slab <= rank
+        const filled = slab <= tier
 
         return (
           <rect
@@ -59,6 +63,9 @@ function ChoiceText({ choice }: { choice: Choice }) {
   )
 }
 
+// Indexed by sizeGridColumns less one; literal so Tailwind keeps them.
+const COLUMNS = ['grid-cols-1', 'grid-cols-2', 'grid-cols-3'] as const
+
 const CARD =
   'relative flex flex-col items-start gap-2 rounded-xl border px-3 py-3 text-left outline-none transition-colors focus-visible:ring-2'
 
@@ -85,12 +92,13 @@ export function BoxSizePicker({
   const locked = (choice: Choice) => left !== null && choice.vcpus > left
 
   return (
-    <div className="grid grid-cols-3 gap-2">
+    // Rows share one height, so a wrapped card matches the row above.
+    <div className={clsx('grid auto-rows-fr gap-2', COLUMNS[sizeGridColumns(choices.length) - 1])}>
       <RadioGroup
         value={String(value)}
         onValueChange={(next: string) => onChange(Number(next))}
         disabled={disabled}
-        aria-label="Size"
+        aria-label={t('Size')}
         className="contents"
       >
         {choices
@@ -111,7 +119,7 @@ export function BoxSizePicker({
                     : 'border-zGray-800 bg-zGray-900 hover:border-zGray-700',
                 )}
               >
-                <SizeGlyph rank={choice.rank} tone={selected ? 'selected' : 'idle'} />
+                <SizeGlyph tier={choice.tier} tone={selected ? 'selected' : 'idle'} />
                 <ChoiceText choice={choice} />
                 <Radio.Indicator
                   keepMounted
@@ -131,7 +139,10 @@ export function BoxSizePicker({
           key={choice.vcpus}
           type="button"
           disabled={disabled}
-          aria-label={`${choice.name}, ${choice.spec}. Needs a bigger plan; choose a plan`}
+          aria-label={t('{name}, {spec}. Needs a bigger plan; choose a plan', {
+            name: choice.name,
+            spec: choice.spec,
+          })}
           onClick={() => onUpgrade(choice)}
           className={clsx(
             CARD,
@@ -139,7 +150,7 @@ export function BoxSizePicker({
           )}
         >
           <span className="flex flex-col items-start gap-2 opacity-55">
-            <SizeGlyph rank={choice.rank} tone="locked" />
+            <SizeGlyph tier={choice.tier} tone="locked" />
             <ChoiceText choice={choice} />
           </span>
           <Lock
@@ -147,7 +158,7 @@ export function BoxSizePicker({
             aria-hidden="true"
           />
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-500 ring-1 ring-amber-500/40 transition-colors group-hover:bg-amber-500/25">
-            Upgrade to unlock
+            {t('Upgrade to unlock')}
             <ArrowUpRight className="h-3 w-3" strokeWidth={2.5} aria-hidden="true" />
           </span>
         </button>

@@ -1,7 +1,12 @@
 import { createWorkspaceTab } from '../../workspaceTabFactory.ts'
 
 import { workspaceReducer } from './workspaceReducer.ts'
-import { createWorkspaceState, currentSessionKey, selectCurrentBucket } from './workspaceState.ts'
+import {
+  createWorkspaceState,
+  currentSessionKey,
+  selectCurrentBucket,
+  sessionKeyOf,
+} from './workspaceState.ts'
 
 import type {
   OpenTabOptions,
@@ -31,14 +36,18 @@ export type WorkspaceActions = {
     sessionId: string | null,
     options?: { readOnly?: boolean; teamId?: string; keepMainPage?: boolean },
   ) => void
-  openMainPage: (teamId: string) => void
+  /** Opens the main page, landing on `updater`'s page in the same step so it is one history entry. */
+  openMainPage: (teamId: string, updater?: TabUpdater) => void
   stepSurface: (direction: -1 | 1) => void
+  goToSurface: (index: number) => void
   forgetSession: (sessionId: string) => void
   setSessionReadOnly: (readOnly: boolean) => void
   switchTeam: (teamId: string) => void
   setDockOpen: (open: boolean) => void
   toggleDock: () => void
   openTab: (tab: WorkspaceTabState, options?: OpenTabOptions) => void
+  /** Opens a tab in a conversation's own dock without bringing it on screen. */
+  openTabInSession: (sessionId: string, tab: WorkspaceTabState) => void
   activateTab: (tabId: string) => void
   openTeamTab: (teamId: string) => void
   selectAdjacentTab: (direction: -1 | 1) => void
@@ -99,8 +108,9 @@ export function createWorkspaceStore(
         keepMainPage: options?.keepMainPage,
         resetHomeScroll: sessionId === null && !options?.keepMainPage,
       }),
-    openMainPage: (teamId) => dispatch({ type: 'openMainPage', teamId }),
+    openMainPage: (teamId, updater) => dispatch({ type: 'openMainPage', teamId, updater }),
     stepSurface: (direction) => dispatch({ type: 'stepSurface', direction }),
+    goToSurface: (index) => dispatch({ type: 'goToSurface', index }),
     forgetSession: (sessionId) => dispatch({ type: 'forgetSession', sessionId }),
     setSessionReadOnly: (readOnly) => dispatch({ type: 'setSessionReadOnly', readOnly }),
     // The open session belongs to the team being left, so its dock is not
@@ -122,6 +132,13 @@ export function createWorkspaceStore(
         options: fromMainPage ? { ...options, openDock: true } : options,
       })
     },
+    openTabInSession: (sessionId, tab) =>
+      dispatch({
+        type: 'openTab',
+        sessionKey: sessionKeyOf(sessionId),
+        tab,
+        options: { openDock: true },
+      }),
     activateTab: (tabId) => inCurrentSession({ type: 'activateTab', tabId }),
     openTeamTab: (teamId) => inCurrentSession({ type: 'openTeamTab', teamId }),
     selectAdjacentTab: (direction) => inCurrentSession({ type: 'selectAdjacentTab', direction }),

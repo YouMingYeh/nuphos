@@ -81,7 +81,9 @@ const localUsageSchema = z.object({
 const localAgentStatusSchema = z.object({
   cli: z.object({ installed: z.boolean(), loggedIn: z.boolean().nullable() }),
   version: z.string().max(200).optional(),
-  models: localModelCatalogSchema.optional(),
+  // Never fatal, like usage: a catalog over its bounds costs the model picker,
+  // not the computer's presence (which `localExec` in this same frame decides).
+  models: localModelCatalogSchema.optional().catch(undefined),
   /** The provider's own usage body, as the computer read it with its own
    *  credential, narrowed to the fields runtime-quota normalizes. Unknown keys
    *  are stripped rather than rejected: a provider may add a window, and this
@@ -167,6 +169,13 @@ export const desktopFrameSchema = z.discriminatedUnion('t', [
     reason: z.string().max(500).optional(),
   }),
   z.object({ t: z.literal('pong') }),
+  // Why the computer gave up its previous tunnel, sent once the new one is open.
+  z.object({
+    t: z.literal('dropped'),
+    reason: z.enum(['idle', 'error', 'closed', 'reconnect']),
+    code: z.number().int().optional(),
+    silentMs: z.number().int().nonnegative(),
+  }),
 ])
 
 export type DesktopFrame = z.infer<typeof desktopFrameSchema>
@@ -203,7 +212,9 @@ export type HolderMessage =
   | { t: 'supersede'; conn: string; previous?: string }
   | { t: 'revoke' }
   /** Close what one person opened; the tunnel and everyone else's streams stay. */
-  | { t: 'revoke-actor'; actorId: string }
+  /** Without a team, every team's streams of that person close; with one, only that team's. */
+  | { t: 'revoke-actor'; actorId: string; teamId?: string }
+  /** The holder's own echo, proving its subscription still delivers. */
   | { t: 'ping'; conn: string }
   | { t: 'metrics'; conn: string; leaseMs: number }
 

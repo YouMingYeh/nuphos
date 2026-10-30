@@ -21,12 +21,15 @@ import {
 } from './runtime-workspace'
 
 import type { AgentConversation } from '@/lib/agent/db/shared'
+import type { RuntimeFallbackReason } from '@/lib/agent/db/timeline-events'
 
 export async function moveConversationRuntime(
   conversation: AgentConversation,
   targetId: string,
   mode: 'history' | 'workspace',
   userId: string,
+  /** A fallback names its reason; `claimed` when the caller already holds the session's run claim. */
+  options: { reason?: RuntimeFallbackReason; claimed?: boolean } = {},
 ) {
   const teamId = conversation.teamId
   const ownerId = conversation.userId
@@ -52,7 +55,7 @@ export async function moveConversationRuntime(
       'runtime_environment_mismatch',
       'This conversation belongs to another environment. Open it there to move it to another agent. Nothing has been changed.',
     )
-  const target = await requireRuntimeInstance(teamId, targetId, userId)
+  const target = await requireRuntimeInstance(teamId, targetId, userId, { shared: true })
 
   // Local and self-hosted agents run on someone's own machine, with the owner's
   // credentials; only the owner puts a session there.
@@ -90,7 +93,11 @@ export async function moveConversationRuntime(
         'workspace_unavailable',
         'A local agent cannot receive a workspace. Choose conversation history only.',
       )
-    endpoints.push(await resolveLocalRuntimeEndpoint(teamId, target.id, userId, 'transport'))
+    endpoints.push(
+      await resolveLocalRuntimeEndpoint(teamId, target.id, userId, 'transport', undefined, {
+        source: conversation.metadata?.source,
+      }),
+    )
   }
   const endpoint = endpoints.find((entry) => entry.runtimeId === target.id)
 
@@ -120,7 +127,9 @@ export async function moveConversationRuntime(
   let release: (() => void) | null = null
 
   try {
-    release = await claimAgentRunForSession(ownerId, conversation.sessionId, true)
+    release = options.claimed
+      ? () => {}
+      : await claimAgentRunForSession(ownerId, conversation.sessionId, true)
     if (!release)
       throw new AppError(
         409,
@@ -143,7 +152,7 @@ export async function moveConversationRuntime(
       await restoreRuntimeWorkspace(archive, target.provider, endpoint.url)
     }
     await assertRuntimeNotDeleting(teamId, target.id)
-    const latestTarget = await requireRuntimeInstance(teamId, target.id, userId)
+    const latestTarget = await requireRuntimeInstance(teamId, target.id, userId, { shared: true })
 
     if (latestTarget.status !== 'active')
       throw new AppError(
@@ -180,6 +189,7 @@ export async function moveConversationRuntime(
           fromProvider: provider,
           toLabel: target.label,
           toProvider: target.provider,
+          ...(options.reason ? { reason: options.reason } : {}),
         }),
         ...(sourceUrl ? { $addToSet: { previousRuntimeUrls: sourceUrl } } : {}),
         // A move leaves the conversation exactly where a brand-new one starts:

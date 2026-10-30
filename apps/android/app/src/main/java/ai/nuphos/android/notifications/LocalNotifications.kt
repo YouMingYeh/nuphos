@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.core.app.NotificationCompat
+import androidx.core.app.RemoteInput
 import ai.nuphos.android.MainActivity
 import ai.nuphos.android.R
 
@@ -50,12 +51,12 @@ class LocalNotifications(
         return true
     }
 
-    fun post(target: LocalNotificationTarget, title: String = "Nuphos", body: String = "Open conversation history", badge: Int? = null): Boolean {
+    fun post(target: LocalNotificationTarget, title: String = "Nuphos", body: String = "Open agent history", badge: Int? = null): Boolean {
         if (LocalNotificationTarget.from(target.accountId, target.teamId, target.sessionId) != target ||
             account() != target.accountId || !aiAllowed() ||
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED ||
             !manager.areNotificationsEnabled()) return false
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Conversation updates", NotificationManager.IMPORTANCE_DEFAULT))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Agent updates", NotificationManager.IMPORTANCE_DEFAULT))
         if (manager.getNotificationChannel(CHANNEL).importance == NotificationManager.IMPORTANCE_NONE) return false
         val intent = Intent(context, MainActivity::class.java).setAction(ACTION)
             .setData(Uri.Builder().scheme("nuphos-local").authority("conversation")
@@ -63,11 +64,20 @@ class LocalNotifications(
             .putExtra(ACCOUNT, target.accountId).putExtra(TEAM, target.teamId).putExtra(SESSION, target.sessionId)
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val tap = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        // Mutable so the system can fill in the typed text; the explicit receiver keeps it private.
+        val replyIntent = Intent(context, NotificationReplyReceiver::class.java).setData(intent.data)
+            .putExtra(ACCOUNT, target.accountId).putExtra(TEAM, target.teamId).putExtra(SESSION, target.sessionId)
+        val reply = NotificationCompat.Action.Builder(R.drawable.ic_notification, "Reply",
+            PendingIntent.getBroadcast(context, 0, replyIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE))
+            .addRemoteInput(RemoteInput.Builder(REPLY).setLabel("Message").build())
+            // Unlocking first: a reply can start agent work on the team's accounts.
+            .setAuthenticationRequired(true)
+            .build()
         val notification = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(body)
-            .setNumber(badge ?: 0).setContentIntent(tap).setAutoCancel(true)
+            .setNumber(badge ?: 0).setContentIntent(tap).setAutoCancel(true).addAction(reply)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).build()
         manager.notify(TAG, target.hashCode(), notification)
         return true
@@ -80,5 +90,6 @@ class LocalNotifications(
         const val ACCOUNT = "notification_account"
         const val TEAM = "notification_team"
         const val SESSION = "notification_session"
+        const val REPLY = "notification_reply"
     }
 }

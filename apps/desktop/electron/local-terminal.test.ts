@@ -174,7 +174,7 @@ test('sessions reject another window and cleanup on reload', async (t) => {
   assert.throws(() => sessions.start(other.owner, id, 80, 24), /not available/)
   assert.throws(() => sessions.input(other.owner, id, 'test'), /not available/)
   assert.throws(() => sessions.close(other.owner, id), /not available/)
-  first.emitter.emit('did-start-navigation', {}, 'http://localhost:5173/', false, true)
+  first.emitter.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
   assert.throws(() => sessions.replay(first.owner, id), /not available/)
   sessions.close(first.owner, id)
 })
@@ -192,7 +192,7 @@ test(
     sessions.start(owner, 'agent-tab', 80, 24, undefined, scope)
     assert.throws(
       () => sessions.agentRequest('agent-tab', 'another-conversation', 'echo bad\r'),
-      /another conversation/,
+      /another agent/,
     )
     const ready = waitForOutput(emitter, 'AGENT_SHARED_OUTPUT')
 
@@ -219,7 +219,7 @@ test(
 
     sessions.input(owner, 'user-tab', "printf '%s%s\\n' USER_SHELL_ READY\r")
     await userReady
-    assert.throws(() => sessions.agentRequest('user-tab', scope), /another conversation/)
+    assert.throws(() => sessions.agentRequest('user-tab', scope), /another agent/)
     const exited = waitForExit(emitter, 'user-tab', t.signal)
 
     sessions.input(owner, 'user-tab', 'exit\r')

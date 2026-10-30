@@ -16,6 +16,7 @@ import {
   teamIdFromAppPath,
 } from '../../lib/appRoutes'
 import { parseAtlasLink } from '../../lib/atlasLinkMention'
+import { requestArtifactOpen } from '../../lib/sessionArtifacts'
 import { isTeamId } from '../../lib/teamId'
 import { ATLAS_WEB_BASE_URL, toAbsoluteAtlasUrl } from '../../lib/webBaseUrl'
 import { settingsLinkTarget, settingsSectionForPage } from '../../views/settings/settingsNav'
@@ -128,6 +129,19 @@ export function useWorkspaceLinkOpeners(a: Args) {
         return true
       }
 
+      // An artifact link opens its conversation, which then opens the artifact
+      // beside it, once it has loaded for someone allowed to read it.
+      if (
+        navigation.active === 'team.agent' &&
+        navigation.agentSessionId &&
+        navigation.agentArtifact
+      ) {
+        requestArtifactOpen(
+          navigation.agentSessionId,
+          navigation.agentArtifact.artifactId,
+          navigation.agentArtifact.version,
+        )
+      }
       if (beside) {
         const sessionId = navigation.active === 'team.agent' ? navigation.agentSessionId : null
 
@@ -195,6 +209,17 @@ export function useWorkspaceLinkOpeners(a: Args) {
 
   const openAppOpenDeepLink = useCallback(
     (payload: AppOpenDeepLinkPayload) => {
+      // An agent's local_browser tab belongs to its own conversation, which may not be on screen.
+      const sessionNavigation = payload.session ? navigationFromAppPath(payload.path) : null
+
+      if (payload.session && sessionNavigation) {
+        workspaceActions.openTabInSession(
+          payload.session,
+          createWorkspaceTabFromNavigation(sessionNavigation),
+        )
+
+        return
+      }
       // A bare team link keeps its historical "activate the team's tab"
       // semantics instead of resolving to a fresh team-home tab.
       const [pathnameOnly] = payload.path.split(/[?#]/, 1)

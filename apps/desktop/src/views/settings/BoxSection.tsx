@@ -7,11 +7,14 @@ import { toast } from '../../components/ui/toast'
 import { RUNTIME_INSTANCES_CHANGED } from '../../hooks/useRuntimeInstances'
 import { useThisComputer } from '../../hooks/useThisComputer'
 import { useWorkspaceTab } from '../../hooks/useWorkspaceTab'
+import { t } from '../../i18n'
 
+import { DeskShelf } from './BoxDeskShelf'
 import { BOX_METRICS_POLL_MS, boxAgents, boxPollMs, vanishedBoxes } from './boxPresentation'
 import { boxRestartEnded } from './boxRestartPresentation'
 import { boxRestarts } from './boxRestartStore'
 import { BoxRow } from './BoxRow'
+import { LocalAgentSharingCard } from './LocalAgentSharingCard'
 import { NewBoxDialog } from './NewBoxDialog'
 import { PanelHeading } from './RuntimePanel'
 import { useAgentDevices } from './useAgentDevices'
@@ -38,15 +41,20 @@ export function BoxSection({
   instances,
   onSelect,
   canCreate,
+  onOpenSettingsSection,
 }: {
   teamId: string
   /** Only the team's administrators make Boxes; the backend enforces it. */
   canCreate: boolean
   instances: RuntimeInstance[]
   onSelect: (runtimeId: string) => void
+  /** Opens a Settings section: here, Local runtime, where this computer's agent signs in. */
+  onOpenSettingsSection?: (section: string) => void
 }) {
   const thisComputer = useThisComputer()
   const [creating, setCreating] = useState(false)
+  const [sharing, setSharing] = useState(false)
+  const [shareable, setShareable] = useState(false)
   const previous = useRef<AgentDevice[]>([])
   const { usage, reload: reloadUsage } = useBoxUsage(teamId)
   const { isActive } = useWorkspaceTab()
@@ -75,7 +83,10 @@ export function BoxSection({
     )
       window.dispatchEvent(new Event(RUNTIME_INSTANCES_CHANGED))
     for (const device of vanishedBoxes(previous.current, list.devices))
-      toast.error('Box setup failed', `${device.label} could not start and was removed.`)
+      toast.error(
+        t('Computer setup failed'),
+        t('{name} could not start and was removed.', { name: device.label }),
+      )
     for (const { device, kind, outcome } of boxRestarts.settle(list.devices, teamId)) {
       const notice = device && boxRestartEnded(kind, outcome, device.label)
 
@@ -87,11 +98,17 @@ export function BoxSection({
 
   // Everything ever registered stays listed; only its status follows presence.
   const owned = list?.devices ?? []
+  // Sharing is for the person's own computer, never a Box: its card sits under the computers.
+  const ownComputer = owned.find(
+    (device) => device.box === undefined && device.deviceId === thisComputer?.deviceId,
+  )
+  const setUpLocalAgent =
+    onOpenSettingsSection && (() => onOpenSettingsSection('device.localRuntime'))
 
   return (
-    <section aria-label="Boxes" className="min-w-0">
+    <section aria-label={t('Computers')} className="min-w-0">
       <PanelHeading
-        title="Boxes"
+        title={t('Computers')}
         right={
           list?.boxAvailable &&
           canCreate && (
@@ -104,7 +121,7 @@ export function BoxSection({
               }}
             >
               <Box className="h-3.5 w-3.5" />
-              New Box
+              {t('New computer')}
             </Button>
           )
         }
@@ -118,27 +135,24 @@ export function BoxSection({
             role="status"
             className="flex h-[240px] items-center gap-3 text-[12px] text-tertiary"
           >
-            Could not load Boxes.
+            {t('Could not load computers.')}
             <Button size="sm" variant="secondary" onClick={reload}>
-              Retry
+              {t('Retry')}
             </Button>
           </div>
         ) : (
           <div className="t-skel-skeleton is-pulsing" aria-hidden="true">
-            <div className="flex h-[240px] w-[248px] flex-col gap-3 rounded-xl border border-zGray-800/70 p-3">
-              <div className="h-5 w-32 rounded bg-zGray-800/40" />
-              <div className="h-3 w-44 rounded bg-zGray-800/30" />
-              <div className="h-10 rounded bg-zGray-800/30" />
-              <div className="mt-auto flex gap-2">
-                <div className="h-10 w-10 rounded-lg bg-zGray-800/40" />
-                <div className="h-10 w-10 rounded-lg bg-zGray-800/40" />
-              </div>
+            <div className="flex w-[300px] flex-col">
+              <div className="mx-[10px] mb-[42px] mt-[44px] h-[184px] rounded-xl bg-zGray-800/40" />
+              <div className="h-px bg-zGray-800/70" />
+              <div className="mt-3 h-4 w-40 rounded bg-zGray-800/40" />
+              <div className="mt-2 h-3 w-52 rounded bg-zGray-800/30" />
             </div>
           </div>
         )}
         <div className="t-skel-content">
           {owned.length > 0 && (
-            <ul className="flex gap-3 overflow-x-auto pb-2">
+            <DeskShelf>
               {owned.map((device) => (
                 <BoxRow
                   thisComputer={thisComputer?.deviceId === device.deviceId}
@@ -147,13 +161,29 @@ export function BoxSection({
                   device={device}
                   agents={boxAgents(device.deviceId, instances)}
                   onSelect={onSelect}
+                  onSetUpLocalAgent={setUpLocalAgent}
+                  {...(device === ownComputer && shareable
+                    ? { onShare: () => setSharing(true) }
+                    : {})}
                   onChanged={() => {
                     reload()
                     reloadUsage()
                   }}
                 />
               ))}
-            </ul>
+            </DeskShelf>
+          )}
+          {ownComputer && thisComputer && (
+            <div className="mt-3">
+              <LocalAgentSharingCard
+                teamId={teamId}
+                currentUserId={thisComputer.userId}
+                device={ownComputer}
+                editing={sharing}
+                onEditingChange={setSharing}
+                onShareableChange={setShareable}
+              />
+            </div>
           )}
         </div>
       </div>

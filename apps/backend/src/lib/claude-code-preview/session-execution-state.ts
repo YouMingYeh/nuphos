@@ -1,3 +1,8 @@
+import { liveAttachment } from '@/lib/agent/db/shared'
+import { createMessageMetadata } from '@/lib/agent/message-attribution'
+import { attributionHeader } from '@/lib/agent/message-metadata'
+import { AppError } from '@/lib/errors'
+
 import { resolveConversationChatRuntime } from './conversation-chat-route'
 import { abandonPendingPreviewWaits } from './decision-waiter'
 import { reachableRuntimeEndpoint } from './dev-runtime-forward'
@@ -6,21 +11,18 @@ import { OpenAbRpcError } from './openab-acp-errors'
 import { materializeRuntimeAttachments, runtimeAttachments } from './runtime-attachments'
 import { parseSessionExecutionState } from './runtime-execution-snapshot'
 import { rememberRuntimeState } from './runtime-state-store'
+import { withSessionDesktops } from './session-desktops'
 import { steeringText } from './steering-receipt'
 
 import type { SessionExecutionState } from './runtime-execution-snapshot'
-import { liveAttachment } from '@/lib/agent/db/shared'
-import { AppError } from '@/lib/errors'
-
-import { withSessionDesktops } from './session-desktops'
-
+import type { CliTokenPrincipal } from '@/lib/identity/cli-tokens'
 import type { AgentConversation } from '@/lib/agent/db'
 
 /** No live session to report on: the next prompt starts or restores one. */
 export const READY_FOR_NEXT_MESSAGE: SessionExecutionState = {
   state: 'dormant',
   schemaVersion: 2,
-  label: 'Ready — your next message starts the agent',
+  phase: 'dormant',
   actions: { send: true, cancel: false, steer: false, reply: false },
 }
 
@@ -40,11 +42,25 @@ type ExecutionStateConversation = Pick<
 export async function conversationExecutionState(
   conversation: ExecutionStateConversation,
 ): Promise<SessionExecutionState> {
-  return withSessionDesktops(await probeExecutionState(conversation), conversation)
+  // Status reads are polled and fall back to 'disconnected', so they wait briefly.
+  const state = await probeExecutionState(conversation, 3_000).catch(
+    (error: unknown): SessionExecutionState => ({
+      state:
+        error instanceof OpenAbRpcError && error.code === -32601 ? 'unsupported' : 'disconnected',
+    }),
+  )
+
+  return withSessionDesktops(state, conversation)
 }
 
-async function probeExecutionState(
+/**
+ * Prompt admission must retain probe failures rather than treating them as runtime state.
+ * It also keeps the default connect timeout: a computer's tunnel can be slow to open a
+ * stream, and admission failing loses the turn (a scheduled one is not retried).
+ */
+export async function probeExecutionState(
   conversation: ExecutionStateConversation,
+  connectTimeoutMs?: number,
 ): Promise<SessionExecutionState> {
   const attachment = liveAttachment(conversation)
 
@@ -68,7 +84,7 @@ async function probeExecutionState(
       return { state: 'disconnected' }
     client = await OpenAbAcpClient.connect({
       ...(await reachableRuntimeEndpoint(endpoint)),
-      connectTimeoutMs: 3_000,
+      connectTimeoutMs,
       callTimeoutMs: 3_000,
     })
     await client.initialize()
@@ -78,7 +94,13 @@ async function probeExecutionState(
       ),
     )
 
-    if (attachment) rememberRuntimeState(conversation.teamId, attachment.openabSessionId, state)
+    if (attachment)
+      rememberRuntimeState(
+        conversation.teamId,
+        attachment.openabSessionId,
+        state,
+        conversation.sessionId,
+      )
 
     // A continuation parked on a lost output connection moves again only when
     // a prompt reattaches it (runClaudeCodePreviewPrompt). The runtime says
@@ -88,11 +110,6 @@ async function probeExecutionState(
       return { ...state, actions: { ...state.actions, send: true } }
 
     return state
-  } catch (error) {
-    return {
-      state:
-        error instanceof OpenAbRpcError && error.code === -32601 ? 'unsupported' : 'disconnected',
-    }
   } finally {
     client?.close()
   }
@@ -133,12 +150,58 @@ export async function cancelConversationRuntime(conversation: AgentConversation)
 }
 
 /**
+ * Writes a secret the user typed into a file on the conversation's runtime and
+ * returns its path. It rides the attachment program as an inline data URL, so
+ * the value never lands in the transcript, the database or object storage.
+ */
+export async function putConversationSecret(
+  conversation: AgentConversation,
+  secret: { name: string; value: string; userId: string },
+): Promise<string> {
+  const attachment = liveAttachment(conversation)
+
+  if (!attachment || !conversation.teamId)
+    throw new AppError(409, 'runtime_unavailable', 'This conversation has no running agent')
+  const { endpoint } = await resolveConversationChatRuntime(conversation.teamId, conversation, {
+    purpose: 'control',
+    userId: secret.userId,
+  })
+
+  if (!endpoint || endpoint.url !== attachment.runtimeUrl)
+    throw new AppError(409, 'runtime_unavailable', 'Conversation runtime changed')
+  const bytes = Buffer.from(secret.value, 'utf8')
+  const [file] = await materializeRuntimeAttachments(
+    conversation.teamId,
+    conversation.userId,
+    endpoint,
+    [
+      {
+        name: secret.name,
+        url: `data:application/octet-stream;base64,${bytes.toString('base64')}`,
+        size: bytes.length,
+      },
+    ],
+    true,
+  )
+  // file:///C:/x on a Windows computer, file:///tmp/x elsewhere.
+  const path = decodeURIComponent(new URL(file!.uri).pathname)
+
+  return /^\/[A-Za-z]:\//u.test(path) ? path.slice(1) : path
+}
+
+/**
  * Deliver to the existing native turn. No queue, resume, or prompt fallback.
  * Returns the text the runtime received, which is also the steering receipt.
  */
 export async function steerConversationRuntime(
   conversation: AgentConversation,
-  steer: { text: string; groupId?: string; userId: string },
+  steer: {
+    text: string
+    groupId?: string
+    userId: string
+    deviceId?: string
+    cliToken?: CliTokenPrincipal
+  },
   messageId: string,
 ): Promise<string> {
   const attachment = liveAttachment(conversation)
@@ -178,11 +241,17 @@ export async function steerConversationRuntime(
 
   try {
     await client.initialize()
+    // The same attribution a prompt carries: without it the agent cannot tell
+    // a mid-turn instruction or approval from its sender's from anyone else's.
     const result = await client.steerSession(
       attachment.openabSessionId,
       text,
       messageId,
       attachments,
+      attributionHeader(
+        messageId,
+        await createMessageMetadata(steer.userId, 'nuphos', steer.deviceId, steer.cliToken),
+      ),
     )
 
     if (result.outcome !== 'injected')

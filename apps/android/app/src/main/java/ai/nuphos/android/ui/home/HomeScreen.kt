@@ -14,13 +14,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Assignment
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.MonitorHeart
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.semantics.selected
+import ai.nuphos.android.model.ConversationSort
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.rounded.Link
@@ -30,7 +37,6 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.FilterList
 import androidx.compose.material.icons.rounded.MonitorHeart
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,7 +51,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -58,9 +63,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.material3.Checkbox
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
@@ -72,6 +89,15 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
+import androidx.compose.material3.adaptive.layout.ListDetailPaneScaffold
+import androidx.compose.material3.adaptive.layout.PaneAdaptedValue
+import androidx.compose.material3.adaptive.layout.ThreePaneScaffoldValue
+import androidx.compose.material3.adaptive.layout.calculatePaneScaffoldDirective
+import ai.nuphos.android.ui.agent.NewChatComposer
 import androidx.navigation.navArgument
 import ai.nuphos.android.model.ConversationScope
 import ai.nuphos.android.model.HomePage
@@ -105,6 +131,7 @@ import ai.nuphos.android.ui.plans.PlansPage
 import ai.nuphos.android.ui.profile.ProfileSheet
 import ai.nuphos.android.ui.login.SplashScreen
 
+@OptIn(androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi::class)
 @Composable
 fun HomeRoute(
     user: NuphosUser,
@@ -112,9 +139,11 @@ fun HomeRoute(
     plansStore: PlansStore,
     connectorsStore: ConnectorsStore,
 ) {
+    val shareDrafts = (LocalContext.current.applicationContext as ai.nuphos.android.NuphosApplication).incomingShares
     val membershipAuth = LocalAuthSession.current
     // Keep the controller registered for Activity state restoration while memberships load.
     val nav = rememberNavController()
+    val newChatComposer = remember(nav) { movableContentOf { NewChatComposer(nav) } }
     LaunchedEffect(agentStore) {
         val generation = membershipAuth.generation
         val token = membershipAuth.token
@@ -181,7 +210,7 @@ fun HomeRoute(
                     if (!current()) return@withContext
                     if (resolved == null) {
                         links.complete(request)
-                        linkError = "This conversation is unavailable or your account does not have access."
+                        linkError = "This agent is unavailable or your account does not have access."
                     } else if (agentStore.acceptMemberships(resolved.first, resolved.second.id)) {
                         nav.navigate("conversation/${android.net.Uri.encode(request.destination.conversationId)}") {
                             popUpTo("home")
@@ -195,20 +224,27 @@ fun HomeRoute(
             } catch (e: Exception) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main.immediate) {
                     if (current()) {
-                        links.complete(request)
-                        linkError = when (e) {
-                            is NuphosApi.Failure.Unauthorized -> "Sign-in has expired. Sign in again to open this conversation."
-                            is NuphosApi.Failure.Http -> if (e.code == 403 || e.code == 404)
-                                "This conversation is unavailable or your account does not have access."
-                                else "We could not open this conversation. Please try the link again."
-                            else -> "We could not open this conversation. Check your connection and try the link again."
+                        if (e is NuphosApi.Failure.Unauthorized || (e is NuphosApi.Failure.Http && e.code in setOf(403, 404))) {
+                            val key = ai.nuphos.android.session.ComposerDrafts.Key(user.id, request.destination.teamId,
+                                ai.nuphos.android.session.ComposerDrafts.Destination.Chat(request.destination.conversationId))
+                            shareDrafts.drop(key)
                         }
+                        if (!current()) return@withContext
+                        linkError = when (e) {
+                            is NuphosApi.Failure.Unauthorized -> "Sign-in has expired. Sign in again to open this agent."
+                            is NuphosApi.Failure.Http -> if (e.code == 403 || e.code == 404)
+                                "This agent is unavailable or your account does not have access."
+                                else "We could not open this agent. Please try the link again."
+                            else -> "We could not open this agent. Check your connection and try the link again."
+                        }
+                        // Completing this request cancels its LaunchedEffect; do it after the awaited cleanup and error update.
+                        links.complete(request)
                     }
                 }
             }
         }
         linkError?.let { message ->
-            AlertDialog(onDismissRequest = { linkError = null }, title = { Text("Could not open conversation") },
+            AlertDialog(onDismissRequest = { linkError = null }, title = { Text("Could not open agent") },
                 text = { Text(message) }, confirmButton = { TextButton(onClick = { linkError = null }) { Text("OK") } })
         }
         val notifications = (LocalContext.current.applicationContext as ai.nuphos.android.NuphosApplication).localNotifications
@@ -219,45 +255,73 @@ fun HomeRoute(
             val target = notifications.pending.take(notificationAuth.user?.id, agentStore.selectedTeam?.id, notificationAuth.aiAllowed)
             if (target != null) nav.navigate("conversation/${android.net.Uri.encode(target.sessionId)}") { launchSingleTop = true }
         }
-        NavHost(nav, startDestination = "home") {
-            composable("home") {
-                if (membershipsLoading) SplashScreen() else HomeScreen(user, nav, monitoring, triggers, triggerRuns)
-            }
-            composable(
-                "conversation/{id}?fresh={fresh}",
-                arguments = listOf(
-                    navArgument("id") { type = NavType.StringType },
-                    navArgument("fresh") { type = NavType.BoolType; defaultValue = false },
-                ),
-            ) { entry ->
-                val id = entry.arguments?.getString("id").orEmpty()
-                val fresh = entry.arguments?.getBoolean("fresh") == true
-                if (membershipsLoading) SplashScreen()
-                else ConversationScreen(sessionId = id, fresh = fresh, onBack = { nav.popBackStack() }, nav = nav)
-            }
-            composable("plan/{id}") { entry ->
-                val id = entry.arguments?.getString("id").orEmpty()
-                if (membershipsLoading) SplashScreen()
-                else PlanDetailScreen(planId = id, nav = nav, teamId = agentStore.selectedTeam?.id)
-            }
-            composable(
-                "trigger-run/{id}?teamId={teamId}",
-                arguments = listOf(
-                    navArgument("id") { type = NavType.StringType },
-                    navArgument("teamId") { type = NavType.StringType },
-                ),
-            ) { entry ->
-                if (membershipsLoading) SplashScreen()
-                else ConversationScreen(
-                    sessionId = entry.arguments?.getString("id").orEmpty(),
-                    fresh = false,
-                    onBack = { nav.popBackStack() },
-                    nav = nav,
-                    browsingOnly = true,
-                    browsingTeamId = entry.arguments?.getString("teamId"),
-                )
-            }
+        ai.nuphos.android.ui.chat.IncomingShareSheet(nav)
+        val entry by nav.currentBackStackEntryAsState()
+        val showingDetail = entry?.destination?.route?.let { it != "home" } == true
+        val info = currentWindowAdaptiveInfoV2()
+        val wide = info.windowSizeClass.isWidthAtLeastBreakpoint(600)
+        LaunchedEffect(showingDetail) {
+            if (!showingDetail && !membershipsLoading) agentStore.refreshOnResume()
         }
+        AdaptiveHomePanes(
+            wide = wide,
+            showingDetail = showingDetail,
+            listPane = {
+                Box(Modifier.fillMaxSize()) {
+                    if (membershipsLoading) SplashScreen()
+                    else HomeScreen(user, nav, monitoring, triggers, triggerRuns,
+                        showComposer = !wide,
+                        selectedSessionId = entry?.arguments?.getString("id"), newChatComposer = newChatComposer)
+                }
+            },
+            detailPane = {
+                NavHost(nav, startDestination = "home") {
+                    composable("home") {
+                        if (wide && !membershipsLoading) Column(Modifier.fillMaxSize().safeDrawingPadding().wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = 720.dp)) {
+                            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                Text("Start a new agent", style = MaterialTheme.typography.headlineSmall)
+                            }
+                            newChatComposer()
+                        }
+                    }
+                    composable(
+                        "conversation/{id}?fresh={fresh}",
+                        arguments = listOf(
+                            navArgument("id") { type = NavType.StringType },
+                            navArgument("fresh") { type = NavType.BoolType; defaultValue = false },
+                        ),
+                    ) { entry ->
+                        val id = entry.arguments?.getString("id").orEmpty()
+                        val fresh = entry.arguments?.getBoolean("fresh") == true
+                        if (membershipsLoading) SplashScreen()
+                        else ConversationScreen(sessionId = id, fresh = fresh, onBack = { nav.popBackStack("home", false) }, nav = nav,
+                            newChat = wide)
+                    }
+                    composable("plan/{id}") { entry ->
+                        val id = entry.arguments?.getString("id").orEmpty()
+                        if (membershipsLoading) SplashScreen()
+                        else PlanDetailScreen(planId = id, nav = nav, teamId = agentStore.selectedTeam?.id)
+                    }
+                    composable(
+                        "trigger-run/{id}?teamId={teamId}",
+                        arguments = listOf(
+                            navArgument("id") { type = NavType.StringType },
+                            navArgument("teamId") { type = NavType.StringType },
+                        ),
+                    ) { entry ->
+                        if (membershipsLoading) SplashScreen()
+                        else ConversationScreen(
+                            sessionId = entry.arguments?.getString("id").orEmpty(),
+                            fresh = false,
+                            onBack = { nav.popBackStack() },
+                            nav = nav,
+                            browsingOnly = true,
+                            browsingTeamId = entry.arguments?.getString("teamId"),
+                        )
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -269,10 +333,18 @@ fun HomeScreen(
     monitoring: MonitoringStore,
     triggers: TriggersStore,
     triggerRuns: TriggerRunsStore,
+    showComposer: Boolean = true,
+    selectedSessionId: String? = null,
+    newChatComposer: @Composable () -> Unit = { NewChatComposer(nav) },
 ) {
     val store = LocalAgentStore.current
     val plans = LocalPlansStore.current
     var page by rememberSaveable { mutableStateOf(HomePage.Agent.route) }
+    val shares = (LocalContext.current.applicationContext as ai.nuphos.android.NuphosApplication).incomingShares
+    val shared by shares.state.collectAsState()
+    LaunchedEffect(shared?.id, shared?.destination) {
+        if (shared?.destination?.destination == ai.nuphos.android.session.ComposerDrafts.Destination.NewChat) page = HomePage.Agent.route
+    }
     val current = HomePage.fromRoute(page)
     var searching by rememberSaveable { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
@@ -317,30 +389,19 @@ fun HomeScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    // A tonal pill with a chevron, so the workspace name reads as a
-                    // switcher rather than a static title.
-                    TextButton(
-                        onClick = { showWorkspaces = true },
-                        colors = ButtonDefaults.textButtonColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            contentColor = MaterialTheme.colorScheme.onSurface,
-                        ),
-                        contentPadding = PaddingValues(start = 14.dp, end = 8.dp),
-                    ) {
-                        Text(
-                            store.selectedTeam?.name ?: "Choose workspace",
-                            style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        Spacer(Modifier.width(2.dp))
-                        Icon(Icons.Outlined.ExpandMore, contentDescription = null, modifier = Modifier.size(18.dp))
-                    }
+                    PageSwitcher(selected = current, onSelect = {
+                        if (it != current) {
+                            if (current == HomePage.Agent) store.updateSearch("")
+                            if (current == HomePage.Plans) plans.search = ""
+                            page = it.route; searching = false
+                        }
+                    })
                     DropdownMenu(showWorkspaces, onDismissRequest = { showWorkspaces = false }) {
                         store.teams.forEach { team ->
                             DropdownMenuItem(text = { Text(team.name) }, onClick = {
-                                setup.close(); showSetup = false; store.select(team); showWorkspaces = false
+                                setup.close(); showSetup = false
+                                if (store.selectedTeam?.id != team.id) nav.popBackStack("home", false)
+                                store.select(team); showWorkspaces = false
                             })
                         }
                         DropdownMenuItem(text = { Text("Set up a workspace") }, onClick = { showWorkspaces = false; showSetup = true })
@@ -349,7 +410,7 @@ fun HomeScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
                 actions = {
                     if (current == HomePage.Agent || current == HomePage.Plans) {
-                        IconButton(onClick = { searching = !searching }) {
+                        IconButton(onClick = { searching = !searching }, modifier = Modifier.testTag("home-search")) {
                             Icon(Icons.Outlined.Search, contentDescription = "Search")
                         }
                         FilterButton(current)
@@ -374,20 +435,6 @@ fun HomeScreen(
                 .padding(padding)
                 .consumeWindowInsets(padding),
         ) {
-            Text(
-                current.title,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            PageSwitcher(
-                selected = current,
-                onSelect = {
-                    page = it.route
-                    searching = false
-                },
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            )
             if (store.selectedTeam == null && store.teamsPhase == AgentStore.Phase.Loaded) {
                 Column(Modifier.fillMaxWidth().weight(1f).padding(20.dp), verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally) {
@@ -396,7 +443,8 @@ fun HomeScreen(
                 }
             } else AnimatedContent(current, modifier = Modifier.weight(1f), label = "page") { dest ->
                 when (dest) {
-                    HomePage.Agent -> AgentPage(searching = searching, onSearchingChange = { searching = it }, nav = nav)
+                    HomePage.Agent -> AgentPage(searching = searching, onSearchingChange = { searching = it }, nav = nav, showComposer = showComposer, selectedSessionId = selectedSessionId, newChatComposer = newChatComposer)
+                    HomePage.Runtimes -> ai.nuphos.android.ui.agent.RuntimesPage()
                     HomePage.Plans -> PlansPage(searching = searching, onSearchingChange = { searching = it }, nav = nav)
                     HomePage.Connectors -> ConnectorsPage()
                     HomePage.Monitoring -> MonitoringPage(monitoring, store.selectedTeam?.id, onOpenConnectors = { page = HomePage.Connectors.route })
@@ -409,34 +457,50 @@ fun HomeScreen(
     }
     if (showSetup) WorkspaceSetupSheet(setup) { showSetup = false }
     if (showProfile) {
-        ProfileSheet(user = user, onDismiss = { showProfile = false })
+        ProfileSheet(user = user, onDismiss = { showProfile = false }, workspaceName = store.selectedTeam?.name, onWorkspace = { showProfile = false; showWorkspaces = true })
     }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun PageSwitcher(
+internal fun PageSwitcher(
     selected: HomePage,
     onSelect: (HomePage) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
-    ) {
-        HomePage.entries.forEachIndexed { index, page ->
-            val shapes = when (index) {
-                0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                HomePage.entries.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-            }
-            ToggleButton(
-                checked = selected == page,
-                onCheckedChange = { onSelect(page) },
-                shapes = shapes,
-                modifier = Modifier.weight(1f),
-            ) {
-                Icon(page.icon(selected == page), contentDescription = page.title, modifier = Modifier.size(18.dp))
+    var expanded by remember { mutableStateOf(false) }
+    val anchorFocus = remember { FocusRequester() }
+    var restoreFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(expanded) {
+        if (!expanded && restoreFocus) {
+            androidx.compose.runtime.withFrameNanos { }
+            anchorFocus.requestFocus()
+            restoreFocus = false
+        }
+    }
+    fun dismiss() { restoreFocus = true; expanded = false }
+    Box(modifier) {
+        TextButton(
+            onClick = { expanded = true },
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+            modifier = Modifier.heightIn(min = 48.dp).focusRequester(anchorFocus).testTag("home-page-switcher")
+                .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" },
+        ) {
+            Text(selected.title, style = MaterialTheme.typography.headlineSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Spacer(Modifier.width(4.dp))
+            Icon(Icons.Outlined.ExpandMore, contentDescription = null)
+        }
+        DropdownMenu(expanded, onDismissRequest = ::dismiss, modifier = Modifier.testTag("home-page-menu")) {
+            HomePage.entries.forEach { page ->
+                DropdownMenuItem(
+                    text = { Text(page.title) },
+                    modifier = Modifier.testTag("home-page-${page.route}").semantics { this.selected = selected == page },
+                    leadingIcon = {
+                        if (selected == page) Icon(Icons.Outlined.Check, contentDescription = null)
+                        else Spacer(Modifier.size(24.dp))
+                    },
+                    onClick = { dismiss(); onSelect(page) },
+                )
             }
         }
     }
@@ -444,6 +508,7 @@ private fun PageSwitcher(
 
 private fun HomePage.icon(selected: Boolean): ImageVector = when (this) {
     HomePage.Agent -> if (selected) Icons.Rounded.AutoAwesome else Icons.Outlined.AutoAwesome
+    HomePage.Runtimes -> Icons.Outlined.Computer
     HomePage.Monitoring -> if (selected) Icons.Rounded.MonitorHeart else Icons.Outlined.MonitorHeart
     HomePage.Triggers -> if (selected) Icons.Rounded.Bolt else Icons.Outlined.Bolt
     HomePage.Plans -> if (selected) Icons.Rounded.Assignment else Icons.Outlined.Assignment
@@ -451,33 +516,63 @@ private fun HomePage.icon(selected: Boolean): ImageVector = when (this) {
 }
 
 @Composable
-private fun FilterButton(page: HomePage) {
+internal fun FilterButton(page: HomePage) {
     val store = LocalAgentStore.current
     val plans = LocalPlansStore.current
     var expanded by remember { mutableStateOf(false) }
-    IconButton(onClick = { expanded = true }) {
-        Icon(
-            if ((page == HomePage.Agent && store.scope != ConversationScope.Mine) ||
-                (page == HomePage.Plans && plans.showDismissed)
-            ) Icons.Rounded.FilterList else Icons.Outlined.FilterList,
-            contentDescription = "Filter",
-        )
-    }
-    DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
-        if (page == HomePage.Agent) {
-            DropdownMenuItem(
-                text = { Text("My chats") },
-                onClick = { store.updateScope(ConversationScope.Mine); expanded = false },
+    val active = if (page == HomePage.Agent) store.scope != ConversationScope.Mine || store.archivedOnly || store.sort != ConversationSort.Created else plans.showDismissed
+    Box {
+        IconButton(onClick = { expanded = true }, modifier = Modifier.testTag("home-filter").semantics { stateDescription = if (active) "Filters applied" else "Default filters" }) {
+            Icon(
+                if ((page == HomePage.Agent && (store.scope != ConversationScope.Mine || store.archivedOnly || store.sort != ConversationSort.Created)) ||
+                    (page == HomePage.Plans && plans.showDismissed)
+                ) Icons.Rounded.FilterList else Icons.Outlined.FilterList,
+                contentDescription = if (page == HomePage.Agent) "Filter agents" else "Filter",
             )
-            DropdownMenuItem(
-                text = { Text("Team chats") },
-                onClick = { store.updateScope(ConversationScope.Team); expanded = false },
-            )
-        } else {
-            DropdownMenuItem(
-                text = { Text("Show dismissed") },
-                onClick = { plans.showDismissed = !plans.showDismissed; expanded = false },
-            )
+        }
+        DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
+            if (page == HomePage.Agent) {
+                DropdownMenuItem(
+                    text = { Text("My agents") },
+                    modifier = Modifier.semantics { selected = store.scope == ConversationScope.Mine },
+                    leadingIcon = { if (store.scope == ConversationScope.Mine) Icon(Icons.Outlined.Check, null) else Spacer(Modifier.size(24.dp)) },
+                    onClick = { store.updateScope(ConversationScope.Mine); expanded = false },
+                )
+                DropdownMenuItem(
+                    text = { Text("Team agents") },
+                    modifier = Modifier.semantics { selected = store.scope == ConversationScope.Team },
+                    leadingIcon = { if (store.scope == ConversationScope.Team) Icon(Icons.Outlined.Check, null) else Spacer(Modifier.size(24.dp)) },
+                    onClick = { store.updateScope(ConversationScope.Team); expanded = false },
+                )
+                HorizontalDivider()
+                DropdownMenuItem(text = { Text("Sort") }, onClick = {}, enabled = false)
+                ConversationSort.entries.forEach { order ->
+                    DropdownMenuItem(
+                        text = { Text(order.title) },
+                        modifier = Modifier.semantics { selected = store.sort == order },
+                        leadingIcon = {
+                            if (store.sort == order) Icon(Icons.Outlined.Check, contentDescription = null)
+                            else Spacer(Modifier.size(24.dp))
+                        },
+                        onClick = { store.updateSort(order); expanded = false },
+                    )
+                }
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("Archived") },
+                    modifier = Modifier.testTag("filter-archived").semantics {
+                        toggleableState = if (store.archivedOnly) ToggleableState.On else ToggleableState.Off
+                        role = Role.Checkbox
+                    },
+                    leadingIcon = { Checkbox(store.archivedOnly, onCheckedChange = null, modifier = Modifier.clearAndSetSemantics { }) },
+                    onClick = { store.updateArchivedOnly(!store.archivedOnly); expanded = false },
+                )
+            } else {
+                DropdownMenuItem(
+                    text = { Text("Show dismissed") },
+                    onClick = { plans.showDismissed = !plans.showDismissed; expanded = false },
+                )
+            }
         }
     }
 }
@@ -498,4 +593,27 @@ fun PlaceholderPage(page: HomePage) {
             modifier = Modifier.padding(top = 8.dp),
         )
     }
+}
+
+@OptIn(androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi::class)
+@Composable
+internal fun AdaptiveHomePanes(
+    wide: Boolean,
+    showingDetail: Boolean,
+    listPane: @Composable () -> Unit,
+    detailPane: @Composable () -> Unit,
+) {
+    val directive = calculatePaneScaffoldDirective(currentWindowAdaptiveInfoV2()).copy(
+        maxHorizontalPartitions = if (wide) 2 else 1,
+        horizontalPartitionSpacerSize = 1.dp,
+        defaultPanePreferredWidth = 320.dp,
+    )
+    val panes = ThreePaneScaffoldValue(
+        primary = if (wide || showingDetail) PaneAdaptedValue.Expanded else PaneAdaptedValue.Hidden,
+        secondary = if (wide || !showingDetail) PaneAdaptedValue.Expanded else PaneAdaptedValue.Hidden,
+        tertiary = PaneAdaptedValue.Hidden,
+    )
+    // Keep the single NavHost composed even when its pane is hidden.
+    ListDetailPaneScaffold(directive = directive, value = panes,
+        listPane = { listPane() }, detailPane = { detailPane() })
 }

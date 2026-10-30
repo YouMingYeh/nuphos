@@ -189,6 +189,27 @@ describe('local runtime tunnel', () => {
     expect(bob.events.some((event) => event.type === 'close')).toBe(false)
   })
 
+  test('revoking someone in one team leaves their streams in another team open', async () => {
+    const bus = createLocalTunnelBus()
+    const presence = createMemoryPresenceStore()
+
+    await connectDesktop(bus, presence, new Set(['t1', 't2']), { echo: true })
+    const inT1 = openStream(bus, presence, 't1', 'alice')
+    const inT2 = openStream(bus, presence, 't2', 'alice')
+
+    await eventually(() => inT1.events.some((event) => event.type === 'open'))
+    await eventually(() => inT2.events.some((event) => event.type === 'open'))
+    await bus.publish(
+      holderChannel(owner.userId, owner.deviceId),
+      JSON.stringify({ t: 'revoke-actor', actorId: 'alice', teamId: 't1' }),
+    )
+    await eventually(() => inT1.events.some((event) => event.type === 'close'))
+    inT2.socket.send('still here')
+    await eventually(() => inT2.events.some((event) => event.type === 'message'))
+
+    expect(inT2.events.some((event) => event.type === 'close')).toBe(false)
+  })
+
   test('an offline computer fails the connection instead of hanging, and says why', async () => {
     let events: { type: string; reason?: string }[] = []
     const lines = await logged('warn', async () => {
@@ -266,13 +287,55 @@ describe('local runtime tunnel', () => {
     )
   })
 
-  test('presence lives only as long as the socket keeps answering', async () => {
+  test('the computer reports why it gave up its last tunnel', async () => {
+    const desktop = await connectDesktop(
+      createLocalTunnelBus(),
+      createMemoryPresenceStore(),
+      new Set(['t1']),
+    )
+    const lines = await logged('log', async () => {
+      desktop.send({ t: 'dropped', reason: 'idle', silentMs: 12_004 })
+      await tick()
+    })
+
+    expect(lines).toContainEqual(
+      expect.objectContaining({
+        event: 'agent.local_runtime.tunnel_closed',
+        closed_by: 'desktop',
+        reason: 'idle',
+        silent_ms: 12_004,
+      }),
+    )
+  })
+
+  test('a backlog of data without pongs keeps the tunnel open and present', async () => {
+    const bus = createLocalTunnelBus()
+    const presence = createMemoryPresenceStore()
+    const desktop = await connectDesktop(bus, presence, new Set(['t1']), {
+      heartbeatMs: 10,
+      idleTimeoutMs: 40,
+    })
+    const until = Date.now() + 150
+
+    // A busy tunnel: data keeps flowing and the pongs sit behind it.
+    while (Date.now() < until) {
+      desktop.send({ t: 'data', s: 'busy', d: 'x'.repeat(1024) })
+      await tick()
+    }
+    expect(desktop.closed).toBeUndefined()
+    expect(await presence.get(owner.userId, owner.deviceId)).not.toBeNull()
+  })
+
+  test('presence lives only as long as the computer keeps sending', async () => {
     let clock = 0
     const presence = createMemoryPresenceStore(() => clock)
-    const desktop = await connectDesktop(createLocalTunnelBus(), presence, new Set(['t1']))
+    const desktop = await connectDesktop(createLocalTunnelBus(), presence, new Set(['t1']), {
+      heartbeatMs: 1,
+    })
 
     clock += 10_000
-    desktop.send({ t: 'pong' })
+    await tick()
+    desktop.send({ t: 'data', s: 'busy', d: 'x' })
     await tick()
     clock += 10_000
     expect(await presence.get(owner.userId, owner.deviceId)).not.toBeNull()
@@ -287,7 +350,7 @@ describe('local runtime tunnel', () => {
   })
 })
 
-test('a socket and status alone do not advertise presence before the first pong', async () => {
+test('the first frame advertises presence with the status it carries', async () => {
   const presence = createMemoryPresenceStore()
   const tunnel = await attachRuntimeTunnel(
     'u1',
@@ -301,11 +364,70 @@ test('a socket and status alone do not advertise presence before the first pong'
   )
 
   tunnels.push(tunnel)
-  tunnel.receive(JSON.stringify({ t: 'status', status: { agents: {}, localExec: true } }))
   expect(await presence.get('u1', 'd1')).toBeNull()
-  tunnel.receive(JSON.stringify({ t: 'pong' }))
+  tunnel.receive(JSON.stringify({ t: 'status', status: { agents: {}, localExec: true } }))
   await tick()
   expect((await presence.get('u1', 'd1'))?.status?.localExec).toBe(true)
+})
+
+test('a model catalog over its bounds costs the catalog, never the presence', async () => {
+  const presence = createMemoryPresenceStore()
+  const tunnel = await attachRuntimeTunnel(
+    'u1',
+    'd1',
+    { send: () => {}, close: () => {} },
+    { bus: createLocalTunnelBus(), presence, isMember: async () => true },
+  )
+  const models = Array.from({ length: 201 }, (_, i) => ({ id: `m${i}`, name: `M${i}` }))
+
+  tunnels.push(tunnel)
+  tunnel.receive(
+    JSON.stringify({
+      t: 'status',
+      status: {
+        localExec: true,
+        agents: {
+          opencode: {
+            cli: { installed: true, loggedIn: true },
+            models: { models, defaultModel: 'm0', controls: {} },
+          },
+        },
+      },
+    }),
+  )
+  tunnel.receive(JSON.stringify({ t: 'pong' }))
+  await tick()
+  const status = (await presence.get('u1', 'd1'))?.status
+
+  expect(status?.localExec).toBe(true)
+  expect(status?.agents.opencode?.cli.loggedIn).toBe(true)
+  expect(status?.agents.opencode?.models).toBeUndefined()
+})
+
+test('a rejected frame is logged with its failing paths only', async () => {
+  const log = spyOn(console, 'warn').mockImplementation(() => {})
+  const tunnel = await attachRuntimeTunnel(
+    'u1',
+    'd1',
+    { send: () => {}, close: () => {} },
+    {
+      bus: createLocalTunnelBus(),
+      presence: createMemoryPresenceStore(),
+      isMember: async () => true,
+    },
+  )
+
+  tunnels.push(tunnel)
+  tunnel.receive(
+    JSON.stringify({ t: 'status', status: { agents: {}, cliVersion: 'x'.repeat(51) } }),
+  )
+  const lines = log.mock.calls.map((call) => String(call[0]))
+
+  log.mockRestore()
+  const line = lines.find((l) => l.includes('agent.local_runtime.frame_rejected'))
+
+  expect(line).toContain('status.cliVersion')
+  expect(line).not.toContain('xxxxx')
 })
 
 test('a late heartbeat or cleanup from the old holder cannot replace the new lease', async () => {
@@ -372,5 +494,40 @@ test('a status report records the signed-in agents once, not on every repeat', a
   expect(records).toEqual([
     ['u1', 'd1', ['claude-code']],
     ['u1', 'd1', ['claude-code']],
+  ])
+})
+
+test('every usage report is handed to the recorder with its device', async () => {
+  const records: [string, string, number][] = []
+  const tunnel = await attachRuntimeTunnel(
+    'u1',
+    'd1',
+    { send() {}, close() {} },
+    {
+      bus: createLocalTunnelBus(),
+      presence: createMemoryPresenceStore(),
+      isMember: async () => true,
+      recordMetrics: (userId, deviceId, metrics) => {
+        records.push([userId, deviceId, metrics.cpuPercent])
+      },
+    },
+  )
+
+  tunnels.push(tunnel)
+  for (const cpuPercent of [10, 20])
+    tunnel.receive(
+      JSON.stringify({
+        t: 'metrics',
+        metrics: {
+          sampledAt: '2026-10-26T03:40:01.000Z',
+          cpuPercent,
+          memory: { used: 6e9, total: 8e9 },
+          disk: { used: 1e10, total: 1.6e10 },
+        },
+      }),
+    )
+  expect(records).toEqual([
+    ['u1', 'd1', 10],
+    ['u1', 'd1', 20],
   ])
 })

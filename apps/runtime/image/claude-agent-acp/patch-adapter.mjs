@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 import { patchPersonalSkillsRefresh, patchRuntimeDefaults } from '../runtime-defaults.mjs'
+import { patchClaudeAskUserQuestion } from './ask-user-question.mjs'
 import { patchClaudeDefaultEffort } from './default-effort.mjs'
 import { patchClaudeSessionState } from './session-state.mjs'
 import { patchClaudeTurnCompletion } from './turn-completion.mjs'
@@ -30,8 +31,8 @@ if (
   throw new Error('Claude ACP bundle changed; review the Nuphos adapter patches.')
 const mcpAnchor = '            for (const server of params.mcpServers) {'
 if (source.split(mcpAnchor).length !== 2) throw new Error('Expected one Claude MCP server handoff.')
-let patched = patchClaudeDefaultEffort(
-  patchClaudeSessionState(patchClaudeTurnCompletion(source)),
+let patched = patchClaudeAskUserQuestion(
+  patchClaudeDefaultEffort(patchClaudeSessionState(patchClaudeTurnCompletion(source))),
 ).replace(
   mcpAnchor,
   '            for (const server of nuphosBridgeMcpServers(params.mcpServers)) {',
@@ -95,10 +96,42 @@ patched = patched.replace(
   instructionsAnchor,
   `        systemPrompt = await nuphosWithProjectInstructions(systemPrompt, params.cwd);\n${instructionsAnchor}`,
 )
+// When Claude Code dies under the adapter (SIGABRT, OOM), the adapter deletes the
+// session but keeps running. OpenAB judges an agent connection alive while its
+// process runs, so it kept sending every later message to the deleted session.
+// Exit instead: OpenAB keeps one adapter process per conversation, sees this one
+// end, and the next message starts a fresh adapter that resumes the conversation
+// through session/load. Exit after stdout drains, so the failed turn's error
+// still reaches the gateway.
+const processDied =
+  '                delete this.sessions[params.sessionId];\n            }\n            else {\n                this.logger.error(`Session ${params.sessionId}: query stream error: ${message}`);'
+if (patched.split(processDied).length !== 2)
+  throw new Error('Expected one Claude process-death handoff.')
+patched = patched.replace(
+  processDied,
+  processDied.replace(
+    '                delete this.sessions[params.sessionId];\n',
+    '                delete this.sessions[params.sessionId];\n                setImmediate(() => process.stdout.write("", () => process.exit(1)));\n',
+  ),
+)
+// The turn's error names why Claude Code died (the memory limit, or its signal)
+// instead of the adapter's generic "exited unexpectedly, start a new session".
+const deathError =
+  'failAllTurns(RequestError.internalError(undefined, "The Claude Agent process exited unexpectedly. Please start a new session."));'
+if (patched.split(deathError).length !== 2)
+  throw new Error('Expected one Claude process-death error.')
+patched = patched.replace(
+  deathError,
+  'failAllTurns(RequestError.internalError(undefined, nuphosProcessDeathMessage("Claude Code", message.replace(/^Claude Code /, ""))));',
+)
 const sessionHome = readFileSync(new URL('../session-home.mjs', import.meta.url), 'utf8')
 const helper = readFileSync(new URL('../mcp-bridge-config.mjs', import.meta.url), 'utf8')
 const instructions = readFileSync(new URL('./project-instructions.mjs', import.meta.url), 'utf8')
-patched = patchRuntimeDefaults(`${sessionHome}\n${helper}\n${instructions}\n${patched}`)
+const processDeath = readFileSync(new URL('../process-death.mjs', import.meta.url), 'utf8')
+const nativeQuestion = readFileSync(new URL('../native-question.mjs', import.meta.url), 'utf8')
+patched = patchRuntimeDefaults(
+  `${sessionHome}\n${helper}\n${instructions}\n${processDeath}\n${nativeQuestion}\n${patched}`,
+)
 // A live session keeps its query, and with it the HOME it started in, until its
 // fingerprint changes. Make the session home part of it, so a load for another
 // actor (a teammate, or automated work) recreates the query in that actor's home

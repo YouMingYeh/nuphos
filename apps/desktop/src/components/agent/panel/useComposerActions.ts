@@ -2,6 +2,7 @@ import { useCallback, useEffect } from 'react'
 
 import { api } from '../../../api'
 import { useStableCallback } from '../../../hooks/useStableCallback'
+import { t } from '../../../i18n/index.ts'
 import { toast } from '../../ui/toast'
 
 import {
@@ -9,6 +10,7 @@ import {
   insertImageRefs,
   insertMentionIntoEditor,
   insertTextIntoEditor,
+  dropAttachmentPaths,
   saveClipboardAttachments,
 } from './composerSerialize'
 import { useComposerRecall } from './useComposerRecall'
@@ -125,7 +127,7 @@ export function useComposerActions(
 
       addFiles(nextPaths)
     } catch {
-      toast.error('Could not open file picker')
+      toast.error(t('Could not open file picker'))
     }
   }
 
@@ -145,7 +147,7 @@ export function useComposerActions(
       state.setFilePaths((prev) => Array.from(new Set([...prev, ...nextPaths])))
       state.setFolderPaths((prev) => new Set([...prev, ...nextPaths]))
     } catch (err) {
-      toast.apiError('Could not open folder picker', err)
+      toast.apiError(t('Could not open folder picker'), err)
     }
   }
 
@@ -242,10 +244,10 @@ export function useComposerActions(
     const handler = readOnly
       ? null
       : (dt: DataTransfer) => {
-          void saveClipboardAttachments(dt)
+          void dropAttachmentPaths(dt)
             .then(attachPaths)
             .catch((err: unknown) => {
-              toast.apiError('Could not attach files', err)
+              toast.apiError(t('Could not attach files'), err)
             })
         }
 
@@ -271,7 +273,7 @@ export function useComposerActions(
       void saveClipboardAttachments(e.clipboardData)
         .then(attachPaths)
         .catch((err: unknown) => {
-          toast.apiError('Could not attach files', err)
+          toast.apiError(t('Could not attach files'), err)
         })
 
       return

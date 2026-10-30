@@ -1,9 +1,21 @@
 name: Release iOS
 
 on:
-  push:
-    tags: ['ios-v*']
-  workflow_dispatch: {}
+  # Dispatch from main after creating the tag; see release-provenance.yml.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: ios-vX.Y.Z tag to publish (on a merge-queue commit of main)
+        type: string
+        required: true
+      build:
+        description: Build number already on App Store Connect to submit instead of archiving a new one
+        type: string
+        required: false
+      review:
+        description: Submit the version for App Store review; off ships to TestFlight only and leaves a pending review alone
+        type: boolean
+        default: true
 
 concurrency:
   group: release-ios
@@ -13,37 +25,51 @@ permissions:
   contents: read
 
 jobs:
+  provenance:
+    uses: ./.github/workflows/release-provenance.yml
+    with:
+      tag: ${{ inputs.tag }}
+      prefix: ios-v
+    permissions:
+      contents: read
+      actions: read
+
   validate:
-    if: github.repository == 'nuphos/nuphos' && startsWith(github.ref, 'refs/tags/ios-v')
+    needs: provenance
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.provenance.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Validate release tag
         id: version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           VERSION=$(jq -r .version apps/ios/package.json)
           [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo '::error::Expected a stable SemVer version'; exit 1; }
           [[ "$RELEASE_TAG" == "ios-v$VERSION" ]] || { echo '::error::Tag must match the component package version'; exit 1; }
-          git merge-base --is-ancestor HEAD origin/main || { echo '::error::Release commit must be on main'; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
   testflight:
-    needs: validate
+    needs: [provenance, validate]
     environment: ios-release
-    runs-on: macos-26
+    # iPhone Duo shows apps built with an SDK older than iOS 27.1 in a
+    # centered window on its inner display.
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.provenance.outputs.sha }}
           persist-credentials: false
 
       - name: Restore App Store Connect API key
@@ -109,12 +135,18 @@ jobs:
       # would restart below them.
       - name: Choose the build number
         id: build
-        run: echo "number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+        env:
+          BUILD: ${{ inputs.build }}
+        run: |
+          set -euo pipefail
+          [[ -z "$BUILD" || "$BUILD" =~ ^[0-9]+$ ]] || { echo '::error::build must be a number'; exit 1; }
+          echo "number=${BUILD:-$(date -u +%Y%m%d%H%M)}" >> "$GITHUB_OUTPUT"
 
       # Signing settings live in the app target's Release configuration, not
       # here: a setting passed on the command line reaches every target in the
       # build, and the SPM package targets reject a provisioning profile.
       - name: Archive
+        if: inputs.build == ''
         working-directory: apps/ios
         env:
           VERSION: ${{ needs.validate.outputs.version }}
@@ -129,6 +161,7 @@ jobs:
             archive | tail -40
 
       - name: Upload to TestFlight
+        if: inputs.build == ''
         working-directory: apps/ios
         env:
           KEY_PATH: ${{ steps.restore_key.outputs.key_path }}
@@ -185,22 +218,30 @@ jobs:
             echo "::warning::Build $BUILD_NUMBER is still processing after 30 minutes; attach it to $GROUP by hand."
             exit 0
           fi
-          asc builds add-groups --app "$APP_ID" --platform IOS --build-number "$BUILD_NUMBER" \
-            --group "$GROUP" --submit --confirm
-          echo "Build $BUILD_NUMBER added to $GROUP and submitted for Beta App Review." >> "$GITHUB_STEP_SUMMARY"
           echo "build_id=$(jq -r .id <<<"$BUILD")" >> "$GITHUB_OUTPUT"
+          # App Store review does not depend on Beta App Review, which takes
+          # one build of a train at a time; a refusal here must not block it.
+          if asc builds add-groups --app "$APP_ID" --platform IOS --build-number "$BUILD_NUMBER" \
+            --group "$GROUP" --submit --confirm; then
+            echo "Build $BUILD_NUMBER added to $GROUP and submitted for Beta App Review." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Build $BUILD_NUMBER was not submitted for Beta App Review; see the error above."
+          fi
 
       # One App Store version is prepared at a time. A release cut while the
       # previous one is still in review withdraws that submission and reuses its
       # version record. A new record starts from the live version's metadata.
       # What's New and the screenshots always come from the repository.
       - name: Submit the version for App Store review
-        if: steps.beta.outputs.build_id != ''
+        if: steps.beta.outputs.build_id != '' && inputs.review
         working-directory: apps/ios
         env:
           APP_ID: '6812533633'
           VERSION: ${{ needs.validate.outputs.version }}
           BUILD_ID: ${{ steps.beta.outputs.build_id }}
+          # App Store Connect can take more than asc's default 10 minutes to
+          # record the checksum of an uploaded screenshot.
+          ASC_UPLOAD_TIMEOUT: 30m
         run: |
           set -euo pipefail
           echo "asc $(asc --version)" >> "$GITHUB_STEP_SUMMARY"
@@ -298,7 +339,7 @@ jobs:
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail

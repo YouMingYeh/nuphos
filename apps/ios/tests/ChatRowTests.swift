@@ -11,6 +11,7 @@ enum ChatRowTests {
         groupsThinkingButNotNarration()
         streamsCodexThinkingIntoOneRun()
         foldsFinishedWorkUnderOneHeader()
+        liftsThreadBadgesOutOfTheFold()
         rendersReasoningMarkdown()
         keepsNarrationBetweenToolCalls()
         followsTheNewestRun()
@@ -87,7 +88,7 @@ enum ChatRowTests {
             return m
         }
         let agent = message("agent.thread", "agent", "s1", "Reviewer", runtime: "codex").event
-        precondition(agent == .init(name: "Reviewer", logo: "logo-openai", text: "First line\n\nDetails"))
+        precondition(agent == .init(name: "Reviewer", logo: "logo-openai", text: "First line\n\nDetails", agentId: "s1", runtime: "codex"))
         precondition(message("agent.thread", "agent", "nuphos", "Nuphos").event?.logo == nil)
         precondition(message("agent.resource", "system", "GitHub", "GitHub").event?.logo == "logo-github")
         precondition(message("agent.resource", "system", "trigger:1", "Hourly scan").event?.logo == nil)
@@ -110,6 +111,13 @@ enum ChatRowTests {
         for bad in ["https://evil.example/avatar", "http://lh3.googleusercontent.com/avatar", "https://lh3.googleusercontent.com.evil.example/avatar", "https://user@lh3.googleusercontent.com/avatar", "https://lh3.googleusercontent.com:444/avatar"] {
             canonical.metadata = .object(["version": .number(1), "sender": .object(["displayName": .string("Teammate"), "avatarURL": .string(bad)])])
             precondition(canonical.sender?.avatar == nil)
+        }
+        // A photo uploaded to the signed-in backend, a user's or an agent token's.
+        let api = URL(string: "https://api.nuphos.ai")!
+        let uploaded = "https://api.nuphos.ai/avatars/\(String(repeating: "a", count: 24))/\(String(repeating: "b", count: 64)).webp"
+        precondition(ChatMessage.Sender(name: "Grok Bot", avatarURL: uploaded, apiBase: api).avatar != nil)
+        for bad in [uploaded + "?x=1", uploaded.replacingOccurrences(of: "api.nuphos.ai", with: "evil.example"), "https://api.nuphos.ai/avatars/x.webp", "https://api.nuphos.ai/teams/a/avatar.webp"] {
+            precondition(ChatMessage.Sender(name: "Grok Bot", avatarURL: bad, apiBase: api).avatar == nil)
         }
         canonical.metadata = nil
         precondition(canonical.sender == nil)
@@ -168,6 +176,7 @@ enum ChatRowTests {
             case .toolRun(_, _, let items, _):
                 "run:" + items.map { $0.tool.map { "tool.\($0.toolCallId)" } ?? "thinking" }.joined(separator: ",")
             case .work(_, let inner, _): "work[" + shape(inner).joined(separator: " ") + "]"
+            case .tool(_, _, let part, _): "tool.\(part.toolCallId)"
             case .hint(_, let text, _): "hint:\(text)"
             default: "other"
             }
@@ -244,6 +253,27 @@ enum ChatRowTests {
         ], "\(shape(rows))")
         guard case .work(_, let inner, _) = rows[0] else { preconditionFailure() }
         precondition(inner.reduce(0) { $0 + ChatRow.workSteps($1) } == 3)
+    }
+
+    /// A thread badge stays visible but no longer splits the turn into
+    /// several folds that each repeat the whole turn's duration.
+    private static func liftsThreadBadgesOutOfTheFold() {
+        func badge(_ id: String) -> ChatPart {
+            .tool(ChatPart.ToolPart(
+                toolCallId: id, toolName: "send_message_to_thread", isDynamic: false, state: .outputAvailable,
+                input: .object(["threadId": .string("00000000-0000-4000-8000-000000000001")])
+            ))
+        }
+        let message = ChatMessage(id: "m", role: .assistant, parts: [
+            tool("a"), badge("msg1"), tool("b"), badge("msg2"), tool("c"),
+            text("Done."),
+        ])
+        let rows = ChatRow.assistantRows(message, live: false, lastApprovalCallId: nil)
+        precondition(shape(rows) == [
+            "work[run:tool.a run:tool.b run:tool.c]",
+            "tool.msg1", "tool.msg2",
+            "text:Done.",
+        ], "\(shape(rows))")
     }
 
     private static func rendersReasoningMarkdown() {

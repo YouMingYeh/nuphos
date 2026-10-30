@@ -1,3 +1,4 @@
+import { receiveAgentAvatars } from '../lib/agentAvatarChoices.ts'
 import { publishRuntimeStates } from '../lib/agentRuntimeStates.ts'
 import { receiveConversationReadStates } from '../lib/agentUnreadSessions.ts'
 
@@ -19,6 +20,12 @@ import type { CloudCliProvider } from '../lib/cloudCli.ts'
 import type { AgentProvider } from '../types/runtime.ts'
 
 export const agentApi = {
+  agentResolveDecision: (
+    sessionId: string,
+    toolCallId: string,
+    teamId?: string,
+    resolution?: 'answered' | 'dismissed',
+  ) => window.api.agentResolveDecision(sessionId, toolCallId, teamId, resolution),
   agentGetSessionResources: (sessionId: string, teamId: string) =>
     window.api.agentGetSessionResources(sessionId, teamId),
   agentUnlinkSessionResource: (sessionId: string, teamId: string, resourceId: string) =>
@@ -85,6 +92,7 @@ export const agentApi = {
       pendingDecision?: boolean
     },
   ) => {
+    const requestedAt = Date.now()
     const page = await window.api.agentListConversations(teamId, options)
 
     publishRuntimeStates(
@@ -95,11 +103,14 @@ export const agentApi = {
       ),
     )
     receiveConversationReadStates(page.conversations)
+    receiveAgentAvatars(page.conversations, requestedAt)
 
     return page
   },
   agentRenameConversation: (sessionId: string, title: string, teamId?: string) =>
     window.api.agentRenameConversation(sessionId, title, teamId),
+  agentSetConversationAvatar: (sessionId: string, avatar: string | null, teamId?: string) =>
+    window.api.agentSetConversationAvatar(sessionId, avatar, teamId),
   agentSetConversationArchived: (sessionId: string, archived: boolean, teamId?: string) =>
     window.api.agentSetConversationArchived(sessionId, archived, teamId),
   agentSetConversationWatched: (sessionId: string, watching: boolean, teamId?: string) =>
@@ -117,6 +128,8 @@ export const agentApi = {
     groupId?: string,
     queuedId?: string,
   ) => window.api.agentSteerConversation(sessionId, text, teamId, groupId, queuedId),
+  agentSaveSecret: (sessionId: string, name: string, value: string, teamId?: string) =>
+    window.api.agentSaveSecret(sessionId, name, value, teamId),
   agentListQueue: (sessionId: string, teamId?: string) =>
     window.api.agentListQueue(sessionId, teamId),
   agentUnqueueMessage: (sessionId: string, messageId: string, teamId?: string) =>
@@ -126,11 +139,13 @@ export const agentApi = {
   agentGetConversation: async (
     sessionId: string,
     teamId?: string,
-    options?: { tail?: number; runtimeState?: 'omit' },
+    options?: { tail?: number; runtimeState?: 'omit'; messages?: 'omit' },
   ) => {
+    const requestedAt = Date.now()
     const detail = await window.api.agentGetConversation(sessionId, teamId, options)
 
     receiveConversationReadStates([detail], true)
+    receiveAgentAvatars([detail], requestedAt)
 
     return detail
   },
@@ -183,12 +198,8 @@ export const agentApi = {
   ) => window.api.agentListMemories(cursor, limit, teamId, scope, state),
   agentGetMemory: (memoryId: string, teamId?: string, scope?: AgentMemoryScope) =>
     window.api.agentGetMemory(memoryId, teamId, scope),
-  agentGetMemoryIngestEvent: (
-    sessionId: string,
-    teamId?: string,
-    eventId?: string,
-    turnKey?: string,
-  ) => window.api.agentGetMemoryIngestEvent(sessionId, teamId, eventId, turnKey),
+  agentGetMemoryIngestEvent: (sessionId: string, teamId?: string, eventId?: string) =>
+    window.api.agentGetMemoryIngestEvent(sessionId, teamId, eventId),
   agentGetMemoryAttribution: (sessionId: string, teamId?: string, turnKey?: string) =>
     window.api.agentGetMemoryAttribution(sessionId, teamId, turnKey),
   agentGetMemoryScorecard: (teamId?: string, ids?: string[]) =>

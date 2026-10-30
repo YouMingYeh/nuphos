@@ -1,11 +1,13 @@
-import { Keyboard, PanelLeft, Plus, Settings, SquarePen, Users } from 'lucide-react'
+import { ArrowLeftRight, Keyboard, PanelLeft, Plus, Settings, SquarePen, Users } from 'lucide-react'
 
+import { t } from '../../i18n/index.ts'
 import { launcherMatchRank } from '../../lib/launcherMatch.ts'
 import { SHORTCUT_GROUPS } from '../../lib/shortcutsCatalog.ts'
 import {
   ARCHIVED_CHATS_NAV_ITEM,
   TEAM_MANAGEMENT_NAV_ITEMS,
   TEAM_SETTINGS_PAGE_NAV_ITEMS,
+  TEAM_WORKSPACE_NAV_ITEMS,
 } from '../../lib/teamOverviewNav.ts'
 
 import type { AppShortcutAction } from '../../api/window-shell'
@@ -31,12 +33,12 @@ export type PaletteCommand = {
 }
 
 const ACTIONS: { id: PaletteAction; label: string; icon: LucideIcon }[] = [
-  { id: 'new-chat', label: 'New chat', icon: SquarePen },
-  { id: 'new-tab', label: 'New tab', icon: Plus },
-  { id: 'toggle-sidebar', label: 'Toggle sidebar', icon: PanelLeft },
-  { id: 'open-settings', label: 'User settings', icon: Settings },
-  { id: 'open-team-settings', label: 'Team settings', icon: Users },
-  { id: 'shortcuts-help', label: 'Keyboard shortcuts', icon: Keyboard },
+  { id: 'new-chat', label: t('New agent'), icon: SquarePen },
+  { id: 'new-tab', label: t('New tab'), icon: Plus },
+  { id: 'toggle-sidebar', label: t('Toggle sidebar'), icon: PanelLeft },
+  { id: 'open-settings', label: t('User settings'), icon: Settings },
+  { id: 'open-team-settings', label: t('Team settings'), icon: Users },
+  { id: 'shortcuts-help', label: t('Keyboard shortcuts'), icon: Keyboard },
 ]
 
 const comboFor = (label: string) =>
@@ -44,14 +46,17 @@ const comboFor = (label: string) =>
     ?.combos[0]
 
 export const PALETTE_COMMANDS: PaletteCommand[] = [
-  ...[...TEAM_MANAGEMENT_NAV_ITEMS, ...TEAM_SETTINGS_PAGE_NAV_ITEMS, ARCHIVED_CHATS_NAV_ITEM].map(
-    (item) => ({
-      id: item.key,
-      label: item.label,
-      group: 'Go to' as const,
-      icon: item.icon,
-    }),
-  ),
+  ...[
+    ...TEAM_MANAGEMENT_NAV_ITEMS,
+    ...TEAM_WORKSPACE_NAV_ITEMS,
+    ...TEAM_SETTINGS_PAGE_NAV_ITEMS,
+    ARCHIVED_CHATS_NAV_ITEM,
+  ].map((item) => ({
+    id: item.key,
+    label: item.label,
+    group: 'Go to' as const,
+    icon: item.icon,
+  })),
   ...ACTIONS.map((action) => ({
     ...action,
     group: 'Actions' as const,
@@ -59,15 +64,29 @@ export const PALETTE_COMMANDS: PaletteCommand[] = [
   })),
 ]
 
-/** Commands whose name matches, best match first (as in the dock's New Tab);
- *  none for an empty query, so recents stay on top. */
-export function matchPaletteCommands(query: string): PaletteCommand[] {
-  if (!query.trim()) return []
+/** The palette id that switches to a team; usePaletteCommand reads it back. */
+export const SWITCH_TEAM_PREFIX = 'switch-team:'
 
-  return PALETTE_COMMANDS.map((command) => ({
-    command,
-    rank: launcherMatchRank(command.label, query),
+/** Commands whose name matches, best match first (as in the dock's New Tab);
+ *  none for an empty query, so recents stay on top. Other teams join as
+ *  "Switch to …" actions. */
+export function matchPaletteCommands(
+  query: string,
+  otherTeams: { id: string; name: string }[] = [],
+): PaletteCommand[] {
+  if (!query.trim()) return []
+  const teamCommands = otherTeams.map((team) => ({
+    id: `${SWITCH_TEAM_PREFIX}${team.id}`,
+    label: t('Switch to {team}', { team: team.name }),
+    group: 'Actions' as const,
+    icon: ArrowLeftRight,
   }))
+
+  return [...PALETTE_COMMANDS, ...teamCommands]
+    .map((command) => ({
+      command,
+      rank: launcherMatchRank(command.label, query),
+    }))
     .filter((match): match is { command: PaletteCommand; rank: number } => match.rank !== null)
     .sort((a, b) => a.rank - b.rank)
     .map(({ command }) => command)

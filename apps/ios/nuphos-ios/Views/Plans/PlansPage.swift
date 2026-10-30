@@ -44,6 +44,7 @@ struct PlansPage: View {
             }
             .sheet(isPresented: $showPolicy) {
                 PlanApprovalPolicySheet()
+                    .presentationDetents([.medium])
             }
             .confirmationDialog(
                 unplanTarget.map { "Mark plan \($0.displayNumber) as unplanned?" } ?? "",
@@ -278,13 +279,13 @@ struct PlanChatTarget: Identifiable, Hashable {
         switch plan.status {
         case "proposed":
             proceedMessage = nil
-            buttonTitle = "Continue in chat"
+            buttonTitle = "Continue in agent"
         case "approved":
             proceedMessage = "Approved plan #\(plan.id) — please proceed with plan #\(plan.id)."
-            buttonTitle = "Continue in chat"
+            buttonTitle = "Continue in agent"
         default:
             proceedMessage = nil
-            buttonTitle = "Open in chat"
+            buttonTitle = "Open agent"
         }
     }
 

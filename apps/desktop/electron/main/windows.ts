@@ -1,18 +1,20 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow } from 'electron'
 
+import { regionShortcut } from '../../src/lib/regionShortcut'
 import * as k8s from '../k8s'
 import * as podExec from '../pod-exec'
 import * as terminal from '../terminal'
 import { raiseWindow } from '../window-raise'
 
 import { flushPendingDeepLinks } from './deep-links'
-import { liveSessionShortcut } from './session-shortcuts'
 import { APP_NAME, isDev } from './env'
 import { openExternal } from './open-external'
-import { TITLEBAR_ROW_H, titleBarOverlayFor } from './window-titlebar'
+import { liveSessionShortcut } from './session-shortcuts'
+import { titleBarOverlayFor } from './window-titlebar'
+import { trafficLightPositionFor, zoom, zoomStepForKey } from './zoom'
 
 import type { AppShortcutAction as AppShortcut } from '../../src/api/window-shell'
 
@@ -89,24 +91,6 @@ export function dispatchAppShortcut(action: AppShortcut) {
   const win = showMainWindow()
 
   win.webContents.send('app:shortcut', action)
-}
-
-// macOS traffic lights are OS-drawn at a fixed size and ignore page zoom. The
-// leading edge stays put (they're always left-most; the CSS insets counter-scale
-// to keep content beside them), but the titlebar row grows/shrinks with zoom, so
-// place them at the exact geometric centre of the shared 44px titlebar row.
-// At factor 1 this is {14, 15}.
-const TRAFFIC_LIGHT_H = 14 // approx button height (pt), constant across zoom
-const TRAFFIC_LIGHT_LEAD = 14 // leading margin (constant — buttons are fixed-size)
-
-function trafficLightPositionFor(factor: number): { x: number; y: number } {
-  return {
-    // Scales with zoom like the row height does. The buttons are fixed-size, but
-    // the gap beside them is part of the layout, so it grows with everything
-    // else — the CSS reserve in index.css scales in step.
-    x: Math.round(TRAFFIC_LIGHT_LEAD * factor),
-    y: Math.round((TITLEBAR_ROW_H * factor - TRAFFIC_LIGHT_H) / 2),
-  }
 }
 
 export function createWindow(): BrowserWindow {
@@ -219,9 +203,12 @@ export function createWindow(): BrowserWindow {
     const key = input.key.toLowerCase()
     const code = input.code
     const commandOrControl = input.meta || input.control
-    // Session-menu combos (⌥⌘R, ⇧⌘A, …) match the physical key, so they run
-    // before the ⌥ bail-out below.
-    const sessionAction = liveSessionShortcut(win.webContents, input)
+    // ⌘ alone on macOS, where ⌃J and ⌃K are terminal keys; Ctrl alone elsewhere.
+    const modOnly =
+      process.platform === 'darwin' ? input.meta && !input.control : input.control && !input.meta
+    // Session-menu combos (⌥⌘R, ⇧⌘A, …) match the physical key, and F6 has no
+    // modifier at all, so they run before the bail-out below. F6 must leave a terminal.
+    const sessionAction = liveSessionShortcut(win.webContents, input) ?? regionShortcut(input)
 
     if (sessionAction) {
       event.preventDefault()
@@ -231,6 +218,14 @@ export function createWindow(): BrowserWindow {
     }
 
     if (!commandOrControl || input.alt) return
+    const zoomStep = modOnly ? zoomStepForKey(key) : null
+
+    if (zoomStep) {
+      event.preventDefault()
+      zoom(win.webContents, zoomStep)
+
+      return
+    }
 
     // preventDefault also stops the matching macOS menu accelerator from
     // firing, so each combo dispatches exactly once.
@@ -242,11 +237,7 @@ export function createWindow(): BrowserWindow {
     if (input.shift && key === 'n') {
       event.preventDefault()
       createWindow()
-    } else if (
-      !input.shift &&
-      key === 'k' &&
-      (process.platform === 'darwin' ? input.meta && !input.control : input.control && !input.meta)
-    ) {
+    } else if (!input.shift && key === 'k' && modOnly) {
       sendShortcut('search-sessions')
     } else if (!input.shift && key === 'n') {
       sendShortcut('new-chat')
@@ -266,6 +257,8 @@ export function createWindow(): BrowserWindow {
       sendShortcut('toggle-sidebar')
     } else if (input.shift && key === 'enter') {
       sendShortcut('toggle-dock-expanded')
+    } else if (!input.shift && key === 'j' && modOnly) {
+      sendShortcut('toggle-dock')
     } else if (!input.shift && (key === '/' || code === 'Slash')) {
       sendShortcut('shortcuts-help')
     } else if (input.shift && key === 't') {
@@ -283,14 +276,3 @@ export function createWindow(): BrowserWindow {
 
   return win
 }
-
-// The renderer pings on every page-zoom change (cmd +\/-); move the native
-// traffic lights to track the zoomed titlebar. macOS only.
-ipcMain.on('app:zoomChanged', (event) => {
-  if (process.platform !== 'darwin') return
-  const win = BrowserWindow.fromWebContents(event.sender)
-
-  if (!win || win.isDestroyed()) return
-  event.sender.send('app:fullScreenChanged', win.isFullScreen())
-  win.setWindowButtonPosition(trafficLightPositionFor(event.sender.getZoomFactor()))
-})

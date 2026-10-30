@@ -26,6 +26,12 @@ require(releaseVersionName.matches(Regex("[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}"))) {
     "nuphosVersionName must contain 1-64 filename-safe characters"
 }
 
+val enabledIsolationFlags = providers.gradlePropertiesPrefixedBy("nuphosIsolated").get()
+    .filterValues { it == "true" }.keys
+require(enabledIsolationFlags.size <= 1) {
+    "Enable only one isolated fixture flag: ${enabledIsolationFlags.sorted().joinToString()}"
+}
+
 android {
     namespace = "ai.nuphos.android"
     compileSdk = 37
@@ -38,12 +44,42 @@ android {
         versionName = releaseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["contentInputFixtureAuthority"] = "ai.nuphos.content-input-fixture"
         buildConfigField("String", "PUSH_BASE_URL", "\"https://api.nuphos.ai\"")
         buildConfigField("String", "API_BASE_URL", "\"https://api.nuphos.ai\"")
     }
 
     buildTypes {
         debug {
+            if (providers.gradleProperty("nuphosIsolatedRuntimeSheetFixture").orNull == "true") {
+                applicationIdSuffix = ".runtimesheet1375"
+                manifestPlaceholders["contentInputFixtureAuthority"] = "ai.nuphos.runtimesheet1375.test.contentinput"
+            }
+            if (providers.gradleProperty("nuphosIsolatedRuntimesFixture").orNull == "true") {
+                applicationIdSuffix = ".runtimes1373"
+                manifestPlaceholders["contentInputFixtureAuthority"] = "ai.nuphos.runtimes1373.test.contentinput"
+            }
+            if (providers.gradleProperty("nuphosIsolatedPersistentShareFixture").orNull == "true") {
+                applicationIdSuffix = ".sharepersist1359"
+                manifestPlaceholders["contentInputFixtureAuthority"] = "ai.nuphos.sharepersist1359.test.contentinput"
+            }
+            if (providers.gradleProperty("nuphosIsolatedNavigationFixture").orNull == "true") {
+                applicationIdSuffix = ".navigation1371"
+                manifestPlaceholders["contentInputFixtureAuthority"] = "ai.nuphos.navigation1371.test.contentinput"
+            }
+            if (providers.gradleProperty("nuphosIsolatedPinIosFixture").orNull == "true") applicationIdSuffix = ".pinios1370"
+            if (providers.gradleProperty("nuphosIsolatedRowActionsFixture").orNull == "true") applicationIdSuffix = ".rowactions1357"
+            if (providers.gradleProperty("nuphosIsolatedShareFixture").orNull == "true") {
+                applicationIdSuffix = ".shareinput1355"
+                manifestPlaceholders["contentInputFixtureAuthority"] = "ai.nuphos.shareinput1355.test.contentinput"
+            }
+            if (providers.gradleProperty("nuphosIsolatedEmailFixture").orNull == "true") applicationIdSuffix = ".emailfixture1335"
+
+            if (providers.gradleProperty("nuphosIsolatedContentFixture").orNull == "true") {
+                applicationIdSuffix = ".contentinput1337"
+            }
+            if (providers.gradleProperty("nuphosIsolatedAdaptiveFixture").orNull == "true") applicationIdSuffix = ".adaptivefixture"
+            if (providers.gradleProperty("nuphosIsolatedImageExportFixture").orNull == "true") applicationIdSuffix = ".imageexport1336"
             buildConfigField("String", "PUSH_BASE_URL", "\"$debugPushBaseUrl\"")
             buildConfigField("String", "API_BASE_URL", "\"$debugApiBaseUrl\"")
         }
@@ -89,6 +125,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
+    implementation("androidx.compose.material3.adaptive:adaptive-layout:1.3.0")
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.browser)

@@ -2,26 +2,30 @@ import { clsx } from 'clsx'
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { connectedResourceLabels } from '../../app/accountScopes'
+import { AgentAvatar } from '../../components/agent/AgentAvatar'
 import { AgentPanel } from '../../components/agent/AgentPanel'
 import { EditableConversationTitle } from '../../components/agent/panel/ConversationTitleEditor'
-import { AgentProviderIcon } from '../../components/agent/panel/icons'
 import { SessionHeaderMenu } from '../../components/agent/SessionHeaderMenu'
 import { SessionParticipants } from '../../components/agent/SessionParticipants'
 import { SessionTitlebarResources } from '../../components/agent/SessionTitlebarResources'
 import { ChatSummaryPanel } from '../../components/agent/summary/ChatSummaryPanel'
 import { ChatSummaryToggle } from '../../components/agent/summary/ChatSummaryToggle'
+import { useComposerReplyTarget } from '../../components/agent/summary/useComposerReplyTarget'
+import { useSessionInputRequests } from '../../components/agent/summary/useSessionInputRequests'
 import { teamCanUseAgent } from '../../lib/agentAccess'
 import { useChatSummaryOpen } from '../../lib/chatSummaryPanel'
 import { hasCloudOnboardingBinding } from '../../lib/connectorCategories'
 import { isLocalAgentRuntime } from '../../lib/localAgentSharing'
 
-import { PaneCloseButton } from './PaneCloseButton'
 import { PaneGrip } from './PaneGrip'
+import { PaneMenu } from './PaneMenu'
 import { SessionFindBar } from './SessionFindBar'
+import { useTitlebarFit } from './titlebarFit'
 import { useSessionHeading } from './useSessionHeading'
 import { useWorkspacePane } from './WorkspacePaneContext'
 
 import type { WorkspaceController } from './useWorkspaceController'
+import type { JournalChatTarget } from '../../lib/journalEvent'
 import type { UserInfo } from '../../types'
 
 export function WorkspaceAgentPane({
@@ -33,7 +37,9 @@ export function WorkspaceAgentPane({
   user: UserInfo
   workspaceExpanded?: boolean
 }) {
-  const paneActive = useWorkspacePane()?.active ?? true
+  const pane = useWorkspacePane()
+  const paneActive = pane?.active ?? true
+  const paneInFront = paneActive && !ws.mainPageOpen
   const {
     accounts,
     activeKubeContext,
@@ -67,6 +73,8 @@ export function WorkspaceAgentPane({
   // The titlebar menu's Rename opens the same inline editor as clicking the title.
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const teamId = scope?.teamId
+  const inputQueue = useSessionInputRequests(savedSessionId, teamId)
+  const { replyTarget, openQuestions } = useComposerReplyTarget(savedSessionId, teamId, inputQueue)
   const connectedResources = useMemo(
     () =>
       connectedResourceLabels(
@@ -112,38 +120,16 @@ export function WorkspaceAgentPane({
     [setAgentSidebarPendingImport],
   )
   const handleLocateConsumed = useCallback(() => setAuditChatLocate(null), [setAuditChatLocate])
+  const handleOpenRequest = useCallback(
+    (sessionId: string, target?: JournalChatTarget) => {
+      workspaceActions.selectSession(sessionId, { keepMainPage: true })
+      setAuditChatLocate(target ? { sessionId, target } : null)
+    },
+    [setAuditChatLocate, workspaceActions],
+  )
 
-  // The dock covers this column instead of reflowing it: while expanded the
-  // content keeps the width it had and the shrinking column clips it, until
-  // the dock has finished its width transition back.
-  const contentRef = useRef<HTMLDivElement>(null)
   const transcriptRef = useRef<HTMLDivElement>(null)
-
-  useLayoutEffect(() => {
-    const content = contentRef.current
-
-    if (!content) return
-    if (workspaceExpanded) {
-      content.style.minWidth = `${String(content.offsetWidth)}px`
-
-      return
-    }
-    const release = (event: TransitionEvent) => {
-      const target = event.target
-
-      if (
-        event.propertyName === 'width' &&
-        target instanceof HTMLElement &&
-        target.dataset.workspaceFocusSurface === 'tab'
-      ) {
-        content.style.minWidth = ''
-      }
-    }
-
-    document.addEventListener('transitionend', release)
-
-    return () => document.removeEventListener('transitionend', release)
-  }, [workspaceExpanded])
+  const [titlebarRef, { compact, tight }] = useTitlebarFit()
 
   if (!teamId) return null
   const mayRename = currentHeading.canRename === true
@@ -159,8 +145,15 @@ export function WorkspaceAgentPane({
         ws.mainPageOpen ? 'hidden' : 'flex',
       )}
     >
-      <div ref={contentRef} className="flex min-h-0 w-full flex-1 flex-col">
+      <div
+        // Laid out at the width the column has once the dock settles, so the
+        // dock's width transition slides over or uncovers it instead of
+        // reflowing the transcript on every frame. Expanded keeps the docked width.
+        style={{ width: dockOpen ? 'calc(100cqw - var(--workspace-dock-width))' : '100cqw' }}
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <div
+          ref={titlebarRef}
           className={clsx(
             'workspace-agent-titlebar relative flex h-[44px] flex-shrink-0 items-center border-b border-zGray-800/60 pl-3',
             // The viewport-anchored dock toggle (see `.workspace-dock-toggle`)
@@ -169,17 +162,13 @@ export function WorkspaceAgentPane({
             dockOpen ? 'pr-3' : 'pr-12',
           )}
         >
-          {/* Keep the native drag rectangle beside the Share action so hit testing
-            never relies on a no-drag hole inside its draggable ancestor. */}
+          {/* Drag area sits beside Share (no no-drag hole); it clips so chips never cover Share. */}
           <div
             key={`heading-${selectedSessionId ?? 'home'}`}
-            className="t-session-heading titlebar-drag flex min-w-0 flex-1 self-stretch items-center gap-2 text-[13px] font-medium text-secondary"
+            className="t-session-heading titlebar-drag flex min-w-0 flex-1 self-stretch items-center gap-2 overflow-hidden text-[13px] font-medium text-secondary"
           >
-            {currentHeading.runtime && (
-              <AgentProviderIcon
-                provider={currentHeading.runtime}
-                className="h-3.5 w-3.5 flex-shrink-0"
-              />
+            {selectedSessionId && (
+              <AgentAvatar agentId={selectedSessionId} provider={currentHeading.runtime} animated />
             )}
             <EditableConversationTitle
               key={`title-${selectedSessionId ?? 'home'}`}
@@ -213,12 +202,13 @@ export function WorkspaceAgentPane({
               currentUserId={user.id}
               canManage={mayRename}
               warnLocalAgent={mayRename && isLocalAgentRuntime(currentHeading.runtimeId)}
+              compact={compact}
             />
           )}
-          {selectedSessionId && currentHeading.saved !== false && (
+          {savedSessionId && (
             <SessionHeaderMenu
-              key={`menu-${selectedSessionId}`}
-              sessionId={selectedSessionId}
+              key={`menu-${savedSessionId}`}
+              sessionId={savedSessionId}
               teamId={teamId}
               userId={user.id}
               title={currentHeading.title}
@@ -226,13 +216,21 @@ export function WorkspaceAgentPane({
               canArchive={currentHeading.canArchive === true}
               watching={currentHeading.watching}
               shortcutsActive={ws.chatShortcutsLive && !ws.mainPageOpen && !workspaceExpanded}
-              onRename={() => setRenamingSessionId(selectedSessionId)}
-              onFork={() => setAgentSidebarPendingFork(selectedSessionId)}
+              onRename={() => setRenamingSessionId(savedSessionId)}
+              onFork={() => setAgentSidebarPendingFork(savedSessionId)}
               canFork={!selectedSessionReadOnly}
+              onClosePane={pane?.split ? pane.closePane : undefined}
+              summaryInMenu={tight}
             />
           )}
-          {savedSessionId && <ChatSummaryToggle active={paneActive && !ws.mainPageOpen} />}
-          <PaneCloseButton />
+          {!savedSessionId && pane?.split && <PaneMenu onClosePane={pane.closePane} />}
+          {savedSessionId && (
+            <ChatSummaryToggle
+              active={paneInFront}
+              hidden={tight}
+              pendingCount={inputQueue.requests.length}
+            />
+          )}
           {/* The rest of the header moves the window, so a pane moves by its grip. Electron cuts
             no-drag holes in page order, so the grip comes after the drag area it sits over. */}
           <PaneGrip label={currentHeading.title} />
@@ -240,7 +238,7 @@ export function WorkspaceAgentPane({
         <SessionFindBar
           key={selectedSessionId ?? 'home'}
           rootRef={transcriptRef}
-          active={paneActive && !ws.mainPageOpen && !workspaceExpanded}
+          active={paneInFront && !workspaceExpanded}
         />
         <div className="@container relative flex min-h-0 min-w-0 flex-1">
           <div ref={transcriptRef} className="flex min-h-0 min-w-0 flex-1">
@@ -260,6 +258,9 @@ export function WorkspaceAgentPane({
               newChatRequest={ws.newChatRequest}
               sessionId={selectedSessionId}
               sessionReadOnly={selectedSessionReadOnly}
+              decisionReplyTo={replyTarget?.chosen ?? undefined}
+              replyTarget={replyTarget}
+              openQuestions={openQuestions}
               onSessionChange={handleSessionChange}
               onOpenNuphosLink={stableOpenNuphosLinkFromChat}
               onOpenAgentSettings={handleOpenAgentSettings}
@@ -282,6 +283,10 @@ export function WorkspaceAgentPane({
               teamId={teamId}
               onOpenLink={stableOpenSessionResource}
               onOpenSession={handleSessionChange}
+              onOpenRequest={handleOpenRequest}
+              requests={inputQueue.requests}
+              requestsLoaded={inputQueue.loaded}
+              requestsFailed={inputQueue.failed}
             />
           )}
         </div>

@@ -22,38 +22,17 @@ final class AgentStore {
     private(set) var hasMore = false
     private var nextCursor: String?
 
-    var scope: NuphosAPI.ConversationScope = .mine {
-        didSet { if scope != oldValue { Task { await reload() } } }
-    }
-    /// Archived chats only (the default list excludes them; the backend
-    /// auto-archives idle chats after a week).
-    var showArchived = false {
-        didSet { if showArchived != oldValue { Task { await reload() } } }
-    }
-    /// The desktop sidebar lists by creation date.
-    var sort: NuphosAPI.ConversationSort = .created {
-        didSet { if sort != oldValue { Task { await reload() } } }
-    }
-
     // MARK: - Pinned chats (sidebar favorites)
 
     private(set) var favorites: SidebarFavorites?
     var pinnedSessionIds: Set<String> { favorites?.pinnedSessionIds ?? [] }
-    /// Pinned chats, newest pin first.
-    private var pinnedOrder: [String] { (favorites?.entries ?? []).compactMap(\.sessionId).reversed() }
+    /// Pinned chats in pin order, as the desktop sidebar lists them.
+    private var pinnedOrder: [String] { (favorites?.entries ?? []).compactMap(\.sessionId) }
 
-    /// Sessions the viewer joined but does not own — the desktop's Shared
-    /// group. Only the personal list adds them; team scope already has them.
-    private(set) var sharedConversations: [AgentConversation] = []
-
-    /// What the Agent page lists: pinned chats first, then the viewer's own
-    /// chats and the ones shared with them, newest first.
+    /// What the Agent page lists, as the desktop sidebar does: pinned chats
+    /// first, then the rest by latest activity.
     var listedConversations: [AgentConversation] {
-        var seen = Set<String>()
-        let date: (AgentConversation) -> Date = sort == .created ? { $0.createdAt } : { $0.lastActiveAt }
-        let rows = (conversations + (scope == .mine ? sharedConversations : []))
-            .filter { seen.insert($0.sessionId).inserted }
-            .sorted { date($0) > date($1) }
+        let rows = conversations.sorted { $0.lastActiveAt > $1.lastActiveAt }
         let rank = Dictionary(pinnedOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
         return rows.compactMap { row in rank[row.sessionId].map { (row, $0) } }.sorted { $0.1 < $1.1 }.map(\.0)
             + rows.filter { rank[$0.sessionId] == nil }
@@ -86,11 +65,11 @@ final class AgentStore {
 
     // MARK: - Archive
 
-    func setArchived(_ archived: Bool, conversation: AgentConversation) async {
-        guard conversation.canManage, let teamId = conversation.teamId ?? selectedTeam?.id else { return }
+    func archive(sessionId: String, teamId: String?) async {
+        guard let teamId = teamId ?? selectedTeam?.id else { return }
         do {
-            try await AgentChatAPI.setArchived(token: token, teamId: teamId, sessionId: conversation.sessionId, archived: archived)
-            removeFromList(conversation.sessionId)
+            try await AgentChatAPI.setArchived(token: token, teamId: teamId, sessionId: sessionId, archived: true)
+            removeFromList(sessionId)
         } catch {
             phase = .failed(error.localizedDescription)
         }
@@ -109,14 +88,13 @@ final class AgentStore {
         }
     }
 
-    /// Drops a chat that left this list (archived or restored). The poller
+    /// Drops a chat that was archived. The poller
     /// keeps rows its first page misses, so it would not drop it; reads
     /// already in flight are discarded so they cannot bring it back. Before
     /// the list has loaded, the discarded read is the load itself, so start
     /// it again.
     func removeFromList(_ sessionId: String) {
         conversations.removeAll { $0.sessionId == sessionId }
-        sharedConversations.removeAll { $0.sessionId == sessionId }
         if phase == .loaded { loadGeneration += 1 } else { Task { await reload() } }
     }
 
@@ -190,11 +168,43 @@ final class AgentStore {
     func loadRuntimes(force: Bool = false) async {
         guard let team = selectedTeam, force || !runtimesLoaded else { return }
         do {
-            runtimes = try await NuphosAPI.runtimeInstances(token: token, teamId: team.id)
+            let next = try await NuphosAPI.runtimeInstances(token: token, teamId: team.id)
+            guard !Task.isCancelled, selectedTeam?.id == team.id else { return }
+            runtimes = next
             runtimesError = nil
             runtimesLoaded = true
         } catch {
+            guard !Task.isCancelled, selectedTeam?.id == team.id else { return }
             runtimesError = error.localizedDescription
+        }
+    }
+
+    private(set) var agentDevices: [AgentDevice] = []
+    private(set) var agentDevicesError = false
+
+    func loadAgentDevices() async {
+        guard let team = selectedTeam else { return }
+        struct Envelope: Decodable { let devices: [AgentDevice] }
+        do {
+            let query = [URLQueryItem(name: "metrics", value: "true"), URLQueryItem(name: "teamId", value: team.id)]
+            let data = try await AgentChatAPI.send("GET", "agent/devices", query: query, token: token, body: JSONValue?.none)
+            let result = try JSONDecoder().decode(Envelope.self, from: data)
+            guard !Task.isCancelled, selectedTeam?.id == team.id else { return }
+            agentDevices = result.devices
+            agentDevicesError = false
+        } catch {
+            guard !Task.isCancelled, selectedTeam?.id == team.id else { return }
+            agentDevicesError = true
+        }
+    }
+
+    /// Reloads devices until cancelled: every 5s, but after 1s while a host
+    /// has no fresh reading yet, since older hosts only start sampling once asked.
+    func pollAgentDevices() async {
+        for round in 0... {
+            await loadAgentDevices()
+            let settling = round < 5 && agentDevices.contains { $0.metricsStatus == "waiting" || $0.metricsStatus == "stale" }
+            do { try await Task.sleep(for: .seconds(settling ? 1 : 5)) } catch { return }
         }
     }
 
@@ -264,8 +274,9 @@ final class AgentStore {
         newModelPick = [:]
         credentials.reset()
         favorites = nil
-        sharedConversations = []
         runtimes = []
+        agentDevices = []
+        agentDevicesError = false
         runtimesLoaded = false
         quotas = [:]
         selectedRuntimeId = selectedTeam.flatMap { UserDefaults.standard.string(forKey: runtimeKey(for: $0)) }
@@ -283,7 +294,7 @@ final class AgentStore {
     /// The viewer's own sessions whose title or first message contains
     /// `query`, newest first, other than `excluded` — what an `@` offers.
     func mentionableSessions(teamId: String, excluding excluded: String?, matching query: String) async -> [AgentConversation] {
-        guard let page = try? await NuphosAPI.conversations(token: token, teamId: teamId, limit: 6, scope: .mine, search: query) else { return [] }
+        guard let page = try? await NuphosAPI.conversations(token: token, teamId: teamId, limit: 6, search: query) else { return [] }
         return Array(page.conversations.filter { $0.sessionId != excluded }.prefix(5))
     }
 
@@ -331,6 +342,14 @@ final class AgentStore {
         ConversationUnread.shared.probe = { team, session in
             _ = try? await NuphosAPI.conversationDetail(token: token, teamId: team, sessionId: session, tail: 1)
         }
+        // The list the last launch showed, until `loadTeams` refreshes it.
+        if let cached = LaunchCache.read(LaunchCache.Agents.self) {
+            selectedTeam = cached.team
+            conversations = cached.conversations
+            favorites = cached.favorites
+            selectedRuntimeId = UserDefaults.standard.string(forKey: runtimeKey(for: cached.team))
+            phase = .loaded
+        }
     }
 
     // MARK: - Teams
@@ -340,22 +359,23 @@ final class AgentStore {
     func loadTeams() async {
         teamsPhase = .loading
         do {
+            let firstLoad = self.teams.isEmpty
             let teams = try await NuphosAPI.teams(token: token)
             self.teams = teams
             teamsPhase = .loaded
             let remembered = UserDefaults.standard.string(forKey: Self.lastTeamKey)
             let pick = teams.first { $0.id == remembered } ?? teams.first
-            if pick != selectedTeam {
+            if pick != selectedTeam || phase == .idle {
                 selectedTeam = pick
                 resetTeamScopedState()
                 await reload()
-            } else if phase == .idle {
-                resetTeamScopedState()
+            } else if firstLoad {
+                // Showing the launch cache: refresh it in place.
                 await reload()
             }
         } catch {
             teamsPhase = .failed(error.localizedDescription)
-            if teams.isEmpty { phase = .failed(error.localizedDescription) }
+            if teams.isEmpty && conversations.isEmpty { phase = .failed(error.localizedDescription) }
         }
     }
 
@@ -375,7 +395,6 @@ final class AgentStore {
     func reload() async {
         guard let team = selectedTeam else {
             conversations = []
-            sharedConversations = []
             phase = teamsPhase == .loaded ? .loaded : phase
             return
         }
@@ -386,38 +405,29 @@ final class AgentStore {
         if conversations.isEmpty { phase = .loading }
         async let favoritesLoad: () = loadFavorites()
         async let runtimesLoad: () = loadRuntimes()
-        async let sharedLoad: () = loadShared(team: team, generation: generation)
 
         do {
             let page = try await NuphosAPI.conversations(
-                token: token, teamId: team.id, limit: Self.pageSize, scope: scope, search: search,
-                archived: showArchived ? .only : .exclude, sort: sort
+                token: token, teamId: team.id, limit: Self.pageSize, search: search
             )
-            _ = await (favoritesLoad, runtimesLoad, sharedLoad)
+            _ = await (favoritesLoad, runtimesLoad)
             guard generation == loadGeneration else { return }
             conversations = page.rows
             nextCursor = page.nextCursor
             hasMore = page.hasMore
             phase = .loaded
+            if search.isEmpty {
+                LaunchCache.write(LaunchCache.Agents(team: team, conversations: page.rows, favorites: favorites))
+            }
             // A pinned chat stays on top however old it is, so page until each one is listed.
-            for _ in 0..<10 where hasMore && search.isEmpty && !showArchived
-                && !Set(pinnedOrder).isSubset(of: (conversations + sharedConversations).map(\.sessionId)) {
+            for _ in 0..<10 where hasMore && search.isEmpty
+                && !Set(pinnedOrder).isSubset(of: conversations.map(\.sessionId)) {
                 await loadMore()
             }
         } catch {
             guard generation == loadGeneration else { return }
             phase = .failed(error.localizedDescription)
         }
-    }
-
-    /// One page of shared sessions, under the same filters as the list.
-    private func loadShared(team: Team, generation: Int) async {
-        guard scope == .mine else { sharedConversations = []; return }
-        guard let page = try? await NuphosAPI.conversations(
-            token: token, teamId: team.id, limit: 100, scope: .shared, search: search,
-            archived: showArchived ? .only : .exclude, sort: sort
-        ), generation == loadGeneration else { return }
-        sharedConversations = page.rows
     }
 
     /// Next page, appended. Rows can repeat across pages because the cursor
@@ -430,8 +440,7 @@ final class AgentStore {
 
         do {
             let page = try await NuphosAPI.conversations(
-                token: token, teamId: team.id, cursor: cursor, limit: Self.pageSize, scope: scope, search: search,
-                archived: showArchived ? .only : .exclude, sort: sort
+                token: token, teamId: team.id, cursor: cursor, limit: Self.pageSize, search: search
             )
             guard generation == loadGeneration else { return }
             if !loadedPageCursors.contains(cursor) { loadedPageCursors.append(cursor) }
@@ -444,7 +453,9 @@ final class AgentStore {
         }
     }
 
-    /// A live session for an existing conversation (loads on first use).
+    /// A live session for an existing conversation, already loading. The
+    /// load belongs to the session, not to the view showing it, so a view
+    /// SwiftUI cancels or keeps cannot leave it unloaded.
     func session(for conversation: AgentConversation) -> ChatSession {
         let session = ChatSession(
             token: token,
@@ -455,6 +466,7 @@ final class AgentStore {
             runtimeLabel: conversation.runtimeLabel
         )
         session.me = me
+        Task { await session.load() }
         return session
     }
 
@@ -463,6 +475,7 @@ final class AgentStore {
     func session(sessionId: String, title: String, teamId: String? = nil) -> ChatSession {
         let session = ChatSession(token: token, teamId: teamId ?? selectedTeam?.id ?? "", sessionId: sessionId, title: title)
         session.me = me
+        Task { await session.load() }
         return session
     }
 
@@ -499,22 +512,18 @@ final class AgentStore {
     }
 
     private func pollOnce() async {
-        RuntimeObservations.shared.tick()
         guard phase == .loaded, !isLoadingMore else { return }
         await refreshFirstPage()
     }
 
-    /// At most three requests per tick: page one, shared sessions and one
-    /// rotating loaded page.
+    /// At most two requests per tick: page one and one rotating loaded page.
     /// Scrolling increases the rotation interval, never the request burst size.
     private func refreshFirstPage() async {
         guard let team = selectedTeam else { return }
         let generation = loadGeneration
         guard let page = try? await NuphosAPI.conversations(
-            token: token, teamId: team.id, limit: Self.pageSize, scope: scope, search: search,
-            archived: showArchived ? .only : .exclude, sort: sort
+            token: token, teamId: team.id, limit: Self.pageSize, search: search
         ), generation == loadGeneration, !Task.isCancelled else { return }
-        await loadShared(team: team, generation: generation)
         conversations = conversations.refreshed(firstPage: page.rows)
         if loadedPageCursors.isEmpty, !isLoadingMore, conversations.count <= page.rows.count {
             nextCursor = page.nextCursor
@@ -524,8 +533,7 @@ final class AgentStore {
         let cursor = loadedPageCursors[refreshPageIndex % loadedPageCursors.count]
         refreshPageIndex = (refreshPageIndex + 1) % loadedPageCursors.count
         guard let background = try? await NuphosAPI.conversations(
-            token: token, teamId: team.id, cursor: cursor, limit: Self.pageSize, scope: scope, search: search,
-            archived: showArchived ? .only : .exclude, sort: sort
+            token: token, teamId: team.id, cursor: cursor, limit: Self.pageSize, search: search
         ), generation == loadGeneration, !Task.isCancelled else { return }
         let fresh = Dictionary(background.rows.map { ($0.sessionId, $0) }, uniquingKeysWith: { first, _ in first })
         conversations = conversations.map { fresh[$0.sessionId] ?? $0 }

@@ -1,12 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { agentApi } from '../../api/agent-api'
+import { t } from '../../i18n'
+import { useAgentAppearance } from '../../lib/agentAppearance'
+import { openChatSummaryChanges } from '../../lib/chatSummaryPanel'
 import { useSessionTerminalProcesses } from '../../lib/sessionTerminalProcesses'
 import { toast } from '../ui/toast'
 
 import { ResourceListMenu } from './ResourceListMenu'
 import { SessionResourceChip } from './SessionResourceChip'
-import { chipNames, resourceChips } from './sessionResourcePresentation'
+import {
+  chipNames,
+  finishedFilter,
+  overflowLabel,
+  resourceChips,
+} from './sessionResourcePresentation'
 import { menuChipClass } from './sessionResourceStyle'
 import { useFittingChips } from './useFittingChips'
 
@@ -30,6 +38,7 @@ export function SessionResources({
   onOpenTab?: (tabId: string) => void
 }) {
   const processes = useSessionTerminalProcesses(sessionId)
+  const { density } = useAgentAppearance()
 
   const [canManage, setCanManage] = useState(false)
   const [removed, setRemoved] = useState<string[]>([])
@@ -82,14 +91,16 @@ export function SessionResources({
       await agentApi.agentUnlinkSessionResource(sessionId, teamId, resourceId)
       setRemoved((ids) => [...ids, resourceId])
     } catch (error) {
-      toast.apiError('Could not unlink resource', error)
+      toast.apiError(t('Could not unlink resource'), error)
     } finally {
       setRemoving((ids) => ids.filter((id) => id !== resourceId))
     }
   }
 
   // In the sidebar a chip opens nothing itself: the click reaches the row and
-  // opens the chat. Lists that open things live in the titlebar only.
+  // opens the chat. Lists that open things live in the titlebar only. The
+  // merged badge is the exception: it also opens the panel, which stays open
+  // per window, so the chat the row opens shows its Changes on that filter.
   const actions: ResourceActions = {
     openResource: (resource, event) => {
       if (!titlebar) return
@@ -102,6 +113,10 @@ export function SessionResources({
       if (!titlebar) return
       event.stopPropagation()
       onOpenTab?.(tabId)
+    },
+    openChanges: (finished, event) => {
+      if (titlebar) event.stopPropagation()
+      openChatSummaryChanges(finishedFilter(finished), sessionId)
     },
   }
 
@@ -123,9 +138,9 @@ export function SessionResources({
       className={
         titlebar
           ? 't-session-heading relative flex flex-1 items-center gap-1 overflow-hidden text-[11px] text-tertiary'
-          : 'relative flex min-w-0 items-center gap-2 overflow-hidden px-2 pb-2 pl-8 text-[11px] text-tertiary'
+          : `relative flex min-w-0 items-center gap-2 overflow-hidden pr-2 text-[11px] text-tertiary ${density === 'compact' ? 'pl-[40px] pb-1' : 'pl-[48px] pb-1.5'}`
       }
-      aria-label="Linked resources"
+      aria-label={t('Linked resources')}
     >
       {chips.slice(0, shown).map((chip) => (
         <SessionResourceChip
@@ -151,7 +166,7 @@ export function SessionResources({
                   }
                 : undefined
             }
-            label={`${String(hidden)} more linked resources, show all`}
+            label={overflowLabel(chips.slice(shown))}
             className={`${menuChipClass(titlebar)} titlebar-no-drag`}
           >
             +{hidden}

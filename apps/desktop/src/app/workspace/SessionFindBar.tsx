@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { InputGroup, InputGroupInput } from '../../components/ui/input-group'
 import { useStableCallback } from '../../hooks/useStableCallback'
+import { t } from '../../i18n'
 import { findOffsets } from '../../lib/findOffsets'
 import { isMac } from '../../lib/platform'
 
@@ -95,7 +96,7 @@ function FindBar({
   onClose: () => void
 }) {
   const [query, setQuery] = useState('')
-  const [result, setResult] = useState({ index: 0, count: 0, partial: false })
+  const [result, setResult] = useState({ index: 0, count: 0, partial: false, folded: false })
 
   const search = useStableCallback((text: string, step: Step) => {
     const root = rootRef.current
@@ -113,6 +114,7 @@ function FindBar({
       index,
       count: ranges.length,
       partial: Boolean(root?.querySelector('[data-earlier-messages]')),
+      folded: Boolean(root?.querySelector('[data-collapsed-activity]')),
     })
   })
 
@@ -156,8 +158,8 @@ function FindBar({
           ref={inputRef}
           autoFocus
           value={query}
-          placeholder="Find in conversation"
-          aria-label="Find in conversation"
+          placeholder={t('Find in conversation')}
+          aria-label={t('Find in conversation')}
           className="w-44 text-main placeholder:text-tertiary"
           onChange={(event) => {
             setQuery(event.target.value)
@@ -186,8 +188,8 @@ function FindBar({
           className={buttonClass}
           disabled={result.count === 0}
           onClick={() => search(query, -1)}
-          title="Previous match"
-          aria-label="Previous match"
+          title={t('Previous match')}
+          aria-label={t('Previous match')}
         >
           <ChevronUp className="h-3.5 w-3.5" strokeWidth={2} />
         </button>
@@ -196,8 +198,8 @@ function FindBar({
           className={buttonClass}
           disabled={result.count === 0}
           onClick={() => search(query, 1)}
-          title="Next match"
-          aria-label="Next match"
+          title={t('Next match')}
+          aria-label={t('Next match')}
         >
           <ChevronDown className="h-3.5 w-3.5" strokeWidth={2} />
         </button>
@@ -205,15 +207,20 @@ function FindBar({
           type="button"
           className={buttonClass}
           onClick={onClose}
-          title="Close"
-          aria-label="Close find"
+          title={t('Close')}
+          aria-label={t('Close find')}
         >
           <X className="h-3.5 w-3.5" strokeWidth={2} />
         </button>
       </div>
       {result.partial && (
         <div className="pb-0.5 pt-1 text-[11px] text-tertiary">
-          Earlier messages are not loaded and are not searched.
+          {t('Earlier messages are not loaded and are not searched.')}
+        </div>
+      )}
+      {result.folded && (
+        <div className="pb-0.5 pt-1 text-[11px] text-tertiary">
+          {t('Expand Activity to search earlier updates.')}
         </div>
       )}
     </InputGroup>

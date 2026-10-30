@@ -23,6 +23,7 @@ struct AgentSetupView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     let team: Team
+    private let selectOnCompletion: Bool
     @State private var provider = RuntimeInstance.Provider.claudeCode
     @State private var name = ""
     @State private var runtime: RuntimeInstance?
@@ -35,8 +36,9 @@ struct AgentSetupView: View {
     @State private var copied = false
     @State private var error: String?
 
-    init(team: Team, runtime: RuntimeInstance? = nil, login: WorkspaceAPI.Login? = nil) {
+    init(team: Team, runtime: RuntimeInstance? = nil, login: WorkspaceAPI.Login? = nil, selectOnCompletion: Bool = true) {
         self.team = team
+        self.selectOnCompletion = selectOnCompletion
         _runtime = State(initialValue: runtime)
         _login = State(initialValue: login)
     }
@@ -56,7 +58,7 @@ struct AgentSetupView: View {
                 Section { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.footnote) }
             }
         }
-        .navigationTitle(runtime?.label ?? "New Agent")
+        .navigationTitle(runtime?.label ?? "New Runtime")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
@@ -156,7 +158,7 @@ struct AgentSetupView: View {
         }
 
         if agentStarting {
-            Section { HStack { Spacer(); ProgressView("Starting your agent…"); Spacer() } }
+            Section { HStack { Spacer(); ProgressView("Starting your runtime…"); Spacer() } }
         } else if let login, login.pending {
             if login.state == "starting" {
                 Section { HStack { Spacer(); ProgressView("Preparing sign-in…"); Spacer() } }
@@ -283,7 +285,7 @@ struct AgentSetupView: View {
             } header: {
                 Text(step.message ?? "")
             } footer: {
-                if step.secret == true { Text("Nuphos encrypts it on its way to the agent, which keeps it; Nuphos does not keep a copy.") }
+                if step.secret == true { Text("Nuphos encrypts it on its way to the runtime, which keeps it; Nuphos does not keep a copy.") }
             }
         } else {
             if let instructions = step.instructions, !instructions.isEmpty {
@@ -330,7 +332,7 @@ struct AgentSetupView: View {
     }
 
     private func headline(_ runtime: RuntimeInstance) -> String {
-        if agentStarting { return "A new agent takes a moment to start." }
+        if agentStarting { return "A new runtime takes a moment to start." }
         guard let login else { return "Use your own \(account(runtime.provider)) account. Your plan's usage limits apply." }
         switch login.state {
         case "connected": return "\(runtime.label) is ready to use."
@@ -368,8 +370,9 @@ struct AgentSetupView: View {
             defer { busy = false; agentStarting = false }
             do {
                 // Like Desktop: wait (up to ~3 minutes) until the agent answers, then sign in.
+                // `wake` resumes a paused Box, which would otherwise never answer.
                 for _ in 0..<90 {
-                    let status: Status? = try? await WorkspaceAPI.request(path(runtime) + "/status", token: token)
+                    let status: Status? = try? await WorkspaceAPI.request(path(runtime) + "/status", query: [URLQueryItem(name: "wake", value: "1")], token: token)
                     if status?.online == true { break }
                     agentStarting = true
                     try await Task.sleep(for: .seconds(2))
@@ -396,7 +399,7 @@ struct AgentSetupView: View {
             async let runtimes: Void = store.loadRuntimes(force: true)
             async let quotas: Void = store.loadQuotas()
             _ = await (runtimes, quotas)
-            store.selectRuntime(runtime)
+            if selectOnCompletion { store.selectRuntime(runtime) }
             dismiss()
         }
     }

@@ -10,6 +10,7 @@ import type { ComposerRecall } from './composerRecall'
 import type { CredentialSelectorControl } from './credentialSections'
 import type { AgentPromptSeed, Message, MessageRating, Tab } from './model'
 import type { AuthorizationDecisionAction, ToolPart, TransferUploadPart } from './parts'
+import type { ComposerReplyTarget, ReplyQuestion } from './replyTarget'
 import type { StallDetail } from './stall'
 import type { TextStreamBuffer } from './streamBuffer'
 import type { useStarterSuggestions } from './useStarterSuggestions'
@@ -52,7 +53,6 @@ export type PanelCtx = {
   onTitleChange?: (
     title: string,
     sessionId: string | null,
-    claudeCodeRuntimeAttached: boolean,
     agentRuntime?: AgentProvider,
     canRename?: boolean,
     runtimeId?: string,
@@ -67,6 +67,11 @@ export type PanelCtx = {
   newChatRequest: number
   autoFocusComposer: boolean
   focusComposerOnOpen: boolean
+  composerDraftId?: string
+  decisionReplyTo?: string
+  hideTranscript: boolean
+  replyTarget?: ComposerReplyTarget
+  openQuestions?: ReplyQuestion[]
   kubeContext?: string | null
   runtimeKubeContextRef?: Ref<string | null | undefined>
   connectedResources?: string[]
@@ -85,7 +90,6 @@ export type PanelCtx = {
   activeId: string
   setActiveId: Dispatch<SetStateAction<string>>
   tabsRef: Ref<Tab[]>
-  autoLearnedFetchedRef: Ref<Set<string>>
   uploadingTabsRef: Ref<Set<string>>
   homeDropRef: Ref<((dt: DataTransfer) => void) | null>
   conversationDropRef: Ref<((dt: DataTransfer) => void) | null>
@@ -120,7 +124,7 @@ export type PanelCtx = {
   lastSyncedRef: Ref<Map<string, string>>
   lastCredentialSyncedRef: Ref<Map<string, string>>
   textBuffersRef: Ref<Map<string, TextStreamBuffer>>
-  turnCompleteRef: Ref<Map<string, { turnKey?: string }>>
+  turnCompleteRef: Ref<Set<string>>
   turnPausedRef: Ref<Map<string, { reason: string; detail?: StallDetail }>>
   streamOwnersRef: Ref<Map<string, { sessionId: string; title: string }>>
   clientToolRunsRef: Ref<Map<string, { cancelled: boolean; requestIds?: string[] }>>
@@ -210,11 +214,13 @@ export type PanelCtx = {
     text: string,
     filePaths: string[],
     turnKind?: Message['turnKind'],
+    decisionReplyTo?: string,
   ) => Promise<void>
   sendInActive: (
     text: string,
     filePaths?: string[],
     turnKind?: Message['turnKind'],
+    decisionReplyTo?: string,
   ) => Promise<void>
   steerQueued: (tabId: string, queuedId: string) => Promise<void>
   handleRejectPlan: (

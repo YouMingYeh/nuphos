@@ -1,6 +1,7 @@
-import { effortLabel, modelChoiceLabel } from '../../../lib/configLabels'
-import { resolvedEffort } from '../../../lib/effortStops'
-import { concreteModelChoices } from '../../../lib/modelChoices'
+import { t } from '../../../i18n/index.ts'
+import { effortLabel, modelChoiceLabel } from '../../../lib/configLabels.ts'
+import { resolvedEffort } from '../../../lib/effortStops.ts'
+import { concreteModelChoices } from '../../../lib/modelChoices.ts'
 
 import type { SessionConfigOption, SessionConfigState } from '../../../api/session-config-types'
 
@@ -16,7 +17,11 @@ export function modelName(option: SessionConfigOption) {
     option.currentValue,
   )
 
-  return label ?? current ?? ''
+  // A runtime's Default is a confirmed selection even when its description
+  // does not identify a concrete model. Do not turn it into a loading state.
+  const selected = option.options.find((choice) => choice.value === option.currentValue)
+
+  return label ?? current ?? (selected ? modelChoiceLabel(selected) : option.currentValue)
 }
 
 export function effortName(option: SessionConfigOption | undefined) {
@@ -30,15 +35,12 @@ export function modelHint(
   status: SessionConfigState['status'] | undefined,
   hasModel: boolean,
   busy: boolean,
-  stalled: boolean,
 ) {
   if (status === 'offline')
-    return 'This agent is offline. Model settings return when it reconnects.'
-  if (busy && stalled)
-    return "This agent hasn't responded in a while — it may be stuck. Try reconnecting below."
-  if (busy) return 'Changes apply after this reply.'
+    return t('This runtime is offline. Model settings return when it reconnects.')
+  if (busy) return t('Changes apply after this reply.')
   if (status === 'dormant' && !hasModel)
-    return 'Send a message to start this session before changing model settings.'
+    return t('Send a message to start this agent before changing model settings.')
 }
 
 /** The composer around a chip: the nearest ancestor holding its message box. */
@@ -51,7 +53,7 @@ export function composerOf(chip: HTMLElement | null) {
 }
 
 /** ⌃⇧M belongs to the composer that has focus, or to the only one on screen. */
-export function ownsShortcut(chip: HTMLElement) {
+export function ownsShortcut(chip: HTMLElement, peers = '[data-model-chip]') {
   const scope = composerOf(chip)
   const active = document.activeElement
 
@@ -59,9 +61,8 @@ export function ownsShortcut(chip: HTMLElement) {
 
   return (
     (!active || active === document.body) &&
-    [...document.querySelectorAll<HTMLElement>('[data-model-chip]')].filter((other) =>
-      other.checkVisibility(),
-    ).length === 1
+    [...document.querySelectorAll<HTMLElement>(peers)].filter((other) => other.checkVisibility())
+      .length === 1
   )
 }
 
@@ -70,11 +71,11 @@ export function ownsShortcut(chip: HTMLElement) {
 export function fastUnavailableReason(option: SessionConfigOption | undefined) {
   const reason = option?.description?.split(' — ')[1]?.trim()
 
-  if (!option || option.currentValue === 'on' || !reason) return undefined
+  if (!option || option.currentValue === 'on' || !reason) return
   const sentence = reason.replace(/\.$/, '')
 
   return {
-    tooltip: `Fast mode ${sentence}.`,
+    tooltip: t('Fast mode {reason}.', { reason: sentence }),
     detail: `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`,
   }
 }

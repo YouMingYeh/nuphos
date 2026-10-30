@@ -2,8 +2,11 @@ import clsx from 'clsx'
 import { ChevronRight, Terminal } from 'lucide-react'
 import { useState } from 'react'
 
+import { t } from '../../../i18n'
+
 import { disclosureControlClass, LoadingText, ToolElapsedBadge } from './partChrome'
 import { getToolLabel, isCommandTool } from './toolPartUtils'
+import { pendingApproval } from './toolRuns'
 
 import type { ToolPart } from './parts'
 import type { ReactNode } from 'react'
@@ -33,13 +36,14 @@ export function ToolRunView({
 }) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null)
   const latest = parts[parts.length - 1]
-  const needsAttention = latest.state === 'approval-requested'
+  const attention = pendingApproval(parts)
+  const needsAttention = attention !== undefined
   // A manual fold must not outlive the approval it was made under: each new
   // request clears the override so it opens the run like the first one did.
   const [attentionFor, setAttentionFor] = useState<string | null>(null)
 
-  if (needsAttention && attentionFor !== latest.toolCallId) {
-    setAttentionFor(latest.toolCallId)
+  if (attention && attentionFor !== attention.toolCallId) {
+    setAttentionFor(attention.toolCallId)
     setUserOpen(null)
   }
   const open = userOpen ?? needsAttention
@@ -50,7 +54,7 @@ export function ToolRunView({
   const toggle = () => setUserOpen(!open)
 
   return (
-    <div className="text-[12.5px]">
+    <div className="text-[12.5px]" data-chat-fold="">
       <button
         type="button"
         onPointerDown={(event) => {
@@ -62,6 +66,7 @@ export function ToolRunView({
           toggle()
         }}
         aria-expanded={open}
+        data-chat-fold-toggle=""
         className={clsx(
           disclosureControlClass,
           'group inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden text-tertiary transition-colors hover:text-secondary',
@@ -87,7 +92,9 @@ export function ToolRunView({
           <ToolElapsedBadge part={latest} now={now} />
         </span>
         {count > 1 && (
-          <span className="flex-shrink-0 text-tertiary/70">· {String(count)} calls</span>
+          <span className="flex-shrink-0 text-tertiary/70">
+            · {t('{n} calls', { n: String(count) })}
+          </span>
         )}
         <ChevronRight
           className={clsx(

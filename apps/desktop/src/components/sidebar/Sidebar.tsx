@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useState } from 'react'
+import { memo, useState } from 'react'
 
 import { useSuspendTitlebarDrag } from '../../hooks/useSuspendTitlebarDrag'
 import { RenameConversationDialog } from '../agent/panel/ConversationTitleEditor'
@@ -15,6 +15,7 @@ import { SidebarIdentitySelector, SidebarInvitations } from './parts'
 import { SidebarSectionList } from './sections-list'
 import { teamSections } from './sections-services'
 import { settingsBackTarget } from './types'
+import { useChatNavKeys } from './use-chat-nav-keys'
 import { useSidebarChrome } from './use-sidebar-chrome'
 import { useSidebarChats, useSidebarCrdSections } from './use-sidebar-data'
 import { useSidebarFavorites } from './use-sidebar-favorites'
@@ -22,7 +23,9 @@ import { sectionsFor, sidebarView } from './view'
 
 import type { Item, SidebarProps } from './types'
 
-export function Sidebar({
+// Memoized: the workspace renders its sidebar on every update; this skips the
+// ones whose props are unchanged.
+export const Sidebar = memo(function Sidebar({
   scope,
   active,
   agentSessionId = null,
@@ -43,6 +46,7 @@ export function Sidebar({
   repositoryNav,
   canGoBack = false,
   canGoForward = false,
+  history,
   onBack,
   onForward,
   onSidebarBack,
@@ -61,6 +65,7 @@ export function Sidebar({
   collapsed = false,
   onToggleCollapse,
   dynamicNavigation = false,
+  chatNavKeysLive = false,
 }: SidebarProps) {
   const [renameTarget, setRenameTarget] = useState<{ sessionId: string; title: string } | null>(
     null,
@@ -68,12 +73,13 @@ export function Sidebar({
   const teamId = scope.teamId
   const chrome = useSidebarChrome({ teamId, collapsed })
   const { width, dragging, setDragging, peek, setPeek } = chrome
-  const { chatItems, newChatActive, archiveChat, unlinkChat, archivingIds } = useSidebarChats({
-    teamId,
-    agentSessionId,
-    chatShown,
-    onArchived: onChatArchived,
-  })
+  const { agentSessions, chatItems, newChatActive, archiveChat, unlinkChat, archivingIds } =
+    useSidebarChats({
+      teamId,
+      agentSessionId,
+      chatShown,
+      onArchived: onChatArchived,
+    })
 
   // Expanded mode restores scope-specific navigation; split mode keeps Chats.
   const teamScope = { kind: 'team' as const, teamId }
@@ -127,8 +133,10 @@ export function Sidebar({
   const sidebarSections = dynamicNavigation
     ? renderSections
     : renderSections.filter(
-        (section, index) => index === 0 || section.title === 'Pinned' || section.title === 'Chats',
+        (section, index) => index === 0 || section.title === 'Pinned' || section.title === 'Agents',
       )
+
+  useChatNavKeys(sidebarSections, chrome.isGroupCollapsed, onSelect, chatNavKeysLive)
 
   const showSidebar = !collapsed || peek
 
@@ -165,6 +173,7 @@ export function Sidebar({
         // other way — the native traffic lights, out of the window — is a hole
         // in the hover region, not an exit.
         onMouseLeave={collapsed ? (event) => setPeek(event.clientX < width) : undefined}
+        data-focus-region={showSidebar ? 'sidebar' : undefined}
         className={clsx(
           'sidebar-surface absolute left-0 top-0 bottom-0 z-40 flex flex-col',
           'transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
@@ -189,6 +198,8 @@ export function Sidebar({
           canGoForward={canGoForward}
           onBack={onBack}
           onForward={onForward}
+          history={history}
+          chatOf={(id) => agentSessions.find((chat) => chat.sessionId === id)}
         />
 
         <SidebarTeamSwitcher
@@ -282,4 +293,4 @@ export function Sidebar({
       )}
     </>
   )
-}
+})

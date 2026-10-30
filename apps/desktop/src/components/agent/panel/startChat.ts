@@ -1,4 +1,5 @@
 import { getActiveDiagramId } from '../../../architecture/activeDiagram.ts'
+import { t } from '../../../i18n/index.ts'
 import { track, trackError } from '../../../lib/analytics.ts'
 import { toast } from '../../ui/toast.ts'
 
@@ -65,7 +66,10 @@ export function runStartChatWith(
   } = ctx
 
   if (newConversationRuntime?.status !== 'active') {
-    toast.error('Choose an available agent', 'Connect or enable an agent in Settings → Agent.')
+    toast.error(
+      t('Choose an available runtime'),
+      t('Connect or enable a runtime in Settings → Runtimes.'),
+    )
 
     return
   }
@@ -265,7 +269,7 @@ export function runStartChatWith(
           streamId: null,
           streamStartedAt: null,
         })
-        toast.apiError('Upload failed', err)
+        toast.apiError(t('Upload failed'), err)
       })
 
     return

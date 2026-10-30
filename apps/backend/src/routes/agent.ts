@@ -7,10 +7,12 @@ import './agent/routes-conversations'
 import './agent/routes-session-resources'
 import './agent/routes-suggestions'
 import './agent/routes-conversations-mutations'
+import './agent/routes-conversations-avatar'
 import './agent/routes-conversations-slack-pickup'
 import './agent/routes-conversations-read'
 import './agent/routes-conversations-watch'
 import './agent/routes-conversation-queue'
+import './agent/routes-conversation-decisions'
 import './agent/routes-plans'
 import './agent/routes-auto-mode'
 import './agent/routes-devices'
@@ -18,10 +20,12 @@ import './agent/routes-device-runtime'
 
 import { agent } from './agent/router'
 import { conversationParticipantsRoutes } from './agent/routes-conversation-participants'
+import { createDeviceShareRoutes } from './agent/routes-devices-share'
 import { sessionConfigRoutes } from './agent/routes-session-config'
 
 agent.route('/', conversationParticipantsRoutes)
 agent.route('/', sessionConfigRoutes)
+agent.route('/', createDeviceShareRoutes())
 
 export { chatSurfaceMessage } from './agent/chat-surface'
 export { launchQueuedChatTurn } from './agent/session-queue-turn'

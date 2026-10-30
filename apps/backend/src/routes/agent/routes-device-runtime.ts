@@ -14,6 +14,7 @@ import { runtimePresenceStore } from '@/lib/agent/devices/local-runtime/presence
 import { DEVICE_CREDENTIAL_PREFIX } from '@/lib/agent/devices/join-tokens'
 import { recordDeviceAgents } from '@/lib/agent/devices/agent-registry-store'
 import { getAgentDevice, isActiveTeamMember } from '@/lib/agent/devices/store'
+import { recordDeviceMetricSample } from '@/lib/claude-code-preview/runtime-metrics-store'
 import { AppError } from '@/lib/errors'
 import { requestOrigin } from '@/lib/request-origin'
 import { getTeamMembers } from '@/lib/identity'
@@ -53,6 +54,7 @@ function defaultDependencies(): DeviceRuntimeRouteDependencies {
       connectionChanged: (userId, deviceId) => {
         void noteBoxPresence(userId, deviceId, getAgentDevice)
       },
+      recordMetrics: recordDeviceMetricSample,
     },
     listActivity: listLocalRuntimeActivity,
     conversationTitlesFor,
@@ -137,6 +139,10 @@ export function createDeviceRuntimeRoutes(
     await requireOwnDevice(c.req.header('Authorization'), userId, deviceId)
     if (c.req.header('upgrade')?.toLowerCase() !== 'websocket')
       throw new AppError(426, 'upgrade_required', 'Connect with a WebSocket')
+    // An app that was taken over asks back with ?reclaim=1; it gets the computer
+    // only once the connection that took it over is gone.
+    if (c.req.query('reclaim') === '1' && (await deps.holder.presence.get(userId, deviceId)))
+      throw new AppError(409, 'device_held', 'Another connection holds this computer')
 
     const from = requestOrigin((name) => c.req.header(name))
     const { recordAgents } = deps.holder

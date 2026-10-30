@@ -1,26 +1,20 @@
 import clsx from 'clsx'
 import { ChevronDown, Plus, Settings2 } from 'lucide-react'
+import { useState } from 'react'
 
 import { useAgentUpdates } from '../../../hooks/useAgentUpdates'
 import { useThisComputer } from '../../../hooks/useThisComputer'
-import { agentName, groupAgentsByTier, listedAgents } from '../../../lib/agentName'
-import { quotaSignedOut } from '../../../lib/runtimeQuota'
+import { t } from '../../../i18n'
+import { agentName } from '../../../lib/agentName'
 import { AGENT_PROVIDER } from '../../../types/runtime'
-import { RuntimeUsageBar } from '../../../views/settings/RuntimeUsageBar'
+import { useAgentDevices } from '../../../views/settings/useAgentDevices'
 import { ConfirmDialog } from '../../ConfirmDialog'
-import {
-  Menu,
-  MenuContent,
-  MenuGroup,
-  MenuGroupLabel,
-  MenuItem,
-  MenuSeparator,
-  MenuTrigger,
-} from '../../ui/menu'
+import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from '../../ui/menu'
 
-import { AgentUpdateBadge } from './AgentUpdateBadge'
 import { AgentProviderIcon } from './icons'
 import { selectedAgentReachability } from './runtimeControlSignOut'
+import { selectorBoxes } from './selectorBoxes'
+import { SelectorBoxMenu } from './SelectorBoxMenu'
 
 import type { RuntimeInstance, RuntimeQuota } from '../../../types/runtime'
 
@@ -36,6 +30,11 @@ export type RuntimeControl = {
     status?: RuntimeInstance['status']
   } | null
   options?: RuntimeInstance[]
+  /** The open conversation: a teammate's computer may still be asking its owner about it. */
+  sessionId?: string
+  /** Its share approval, already watched by the conversation; null when its queued messages
+   *  say it instead of the composer's banner. */
+  shareApproval?: 'pending' | 'denied' | null
   /** Provider usage per runtime id, for the trigger and the list. */
   quotas?: ReadonlyMap<string, RuntimeQuota>
   /** Picks the agent: the one a new conversation starts on, or — for an open
@@ -61,18 +60,10 @@ export type RuntimeControl = {
 }
 
 const AGENT_DOT = {
-  ready: { color: 'bg-success', label: 'Box online · agent ready' },
-  signIn: { color: 'bg-warning', label: 'Box online · agent needs sign-in' },
-  offline: { color: 'bg-error', label: 'Box offline' },
+  ready: { color: 'bg-success', label: t('Computer online · runtime ready') },
+  signIn: { color: 'bg-warning', label: t('Computer online · runtime needs sign-in') },
+  offline: { color: 'bg-error', label: t('Computer offline') },
 } as const
-
-function runtimeOptionNote(instance: RuntimeInstance, quota?: RuntimeQuota): string {
-  if (instance.deletion) return ' · Being removed'
-  if (instance.starting) return ' · Starting…'
-  if (quotaSignedOut(quota)) return ' · Sign in required'
-
-  return ''
-}
 
 export function RuntimeSelector({
   menuOpen,
@@ -101,12 +92,23 @@ export function RuntimeSelector({
   const providerName = AGENT_PROVIDER[value?.provider ?? 'claude-code'].label
   const owner = useThisComputer()
   const selected = value?.id ? options.find((instance) => instance.id === value.id) : undefined
-  const listed = listedAgents(options)
+  const [internalOpen, setInternalOpen] = useState(false)
+  const open = menuOpen ?? internalOpen
+  const setOpen = (next: boolean) => {
+    setInternalOpen(next)
+    onMenuOpenChange?.(next)
+  }
+  const devices = useAgentDevices(() => 5_000, teamId, {
+    metrics: true,
+    enabled: open && Boolean(teamId),
+    teamId,
+  })
+  const groups = selectorBoxes(options, devices.list?.devices, quotas)
   const label = value
     ? agentName(selected ?? { ...(value.id ? { id: value.id } : {}), label: value.label }, owner)
     : loading
-      ? 'Loading agents…'
-      : 'Choose agent'
+      ? t('Loading runtimes…')
+      : t('Choose runtime')
   const updates = useAgentUpdates(teamId, options, canUpdateTeamAgents)
   const reachability = selectedAgentReachability({ value, options })
   const dot = reachability ? AGENT_DOT[reachability] : null
@@ -115,7 +117,7 @@ export function RuntimeSelector({
       <AgentProviderIcon provider={value?.provider} className="h-3.5 w-3.5 shrink-0" />
       {loading && !value ? (
         <span
-          aria-label="Loading agent"
+          aria-label={t('Loading runtime')}
           role="status"
           className="h-3 w-16 rounded bg-zGray-700/60 animate-pulse motion-reduce:animate-none"
         />
@@ -130,7 +132,7 @@ export function RuntimeSelector({
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot.color}`}
         />
       )}
-      {unavailable && <span className="shrink-0 text-amber-400">· Unavailable</span>}
+      {unavailable && <span className="shrink-0 text-amber-400">· {t('Unavailable')}</span>}
     </>
   )
   const classes = clsx(
@@ -157,9 +159,9 @@ export function RuntimeSelector({
           onClose={confirm.onCancel}
         />
       )}
-      <Menu open={menuOpen} onOpenChange={onMenuOpenChange}>
+      <Menu open={open} onOpenChange={setOpen}>
         <MenuTrigger
-          aria-label={`Conversation agent: ${label}`}
+          aria-label={t('Agent runtime: {label}', { label })}
           className={`${classes} transition-colors hover:bg-zGray-800/60 hover:text-main`}
         >
           {content}
@@ -167,56 +169,35 @@ export function RuntimeSelector({
         </MenuTrigger>
         <MenuContent side="top" align="end" className="w-72">
           {error && <p className="px-2 py-2 text-xs text-error">{error}</p>}
-          {!loading && !error && listed.length === 0 && (
+          {!loading && !error && groups.length === 0 && (
             <p className="px-2 py-2 text-xs text-tertiary">
-              Connect an agent in Settings → Agent to get started.
+              {t('Connect a runtime in Settings → Runtimes to get started.')}
             </p>
           )}
-          <div className="max-h-64 overflow-auto">
-            {groupAgentsByTier(listed, owner).map((group, index) => (
-              <MenuGroup key={group.tier}>
-                {index > 0 && <MenuSeparator />}
-                {group.title && <MenuGroupLabel>{group.title}</MenuGroupLabel>}
-                {group.agents.map((instance) => {
-                  const update = updates.get(instance.id)
-
-                  return (
-                    <MenuItem
-                      key={instance.id}
-                      selected={instance.id === value?.id}
-                      disabled={selectDisabled || Boolean(instance.deletion)}
-                      icon={
-                        <AgentProviderIcon provider={instance.provider} className="h-3.5 w-3.5" />
-                      }
-                      onClick={() => onSelect(instance.id)}
-                    >
-                      <span className="flex min-w-0 flex-col">
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate">{agentName(instance, owner)}</span>
-                          {update && <AgentUpdateBadge update={update} actionable />}
-                        </span>
-                        <span className="flex items-center gap-1.5 text-[11px] text-tertiary">
-                          {AGENT_PROVIDER[instance.provider].label}
-                          {runtimeOptionNote(instance, quotas?.get(instance.id))}
-                          <RuntimeUsageBar quota={quotas?.get(instance.id)} />
-                        </span>
-                      </span>
-                    </MenuItem>
-                  )
-                })}
-              </MenuGroup>
+          <div className="max-h-96 overflow-auto">
+            {groups.map((group) => (
+              <SelectorBoxMenu
+                key={group.id}
+                group={group}
+                selectedId={value?.id}
+                metricsUnavailable={devices.error}
+                quotas={quotas}
+                updates={updates}
+                selectDisabled={selectDisabled}
+                onSelect={onSelect}
+              />
             ))}
           </div>
           {(onAddAgent ?? onSettings) && (
             <>
-              {options.length > 0 && <MenuSeparator />}
+              {groups.length > 0 && <MenuSeparator />}
               {onAddAgent ? (
                 <MenuItem icon={<Plus className="h-3.5 w-3.5" />} onClick={onAddAgent}>
-                  Add new agent
+                  {t('Add new runtime')}
                 </MenuItem>
               ) : (
                 <MenuItem icon={<Settings2 className="h-3.5 w-3.5" />} onClick={onSettings}>
-                  Manage agents
+                  {t('Manage computers and runtimes')}
                 </MenuItem>
               )}
             </>

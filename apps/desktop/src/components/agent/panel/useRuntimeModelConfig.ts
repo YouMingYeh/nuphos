@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { api } from '../../../api'
+import { t } from '../../../i18n/index.ts'
 
 import type { ModelControl } from './ModelSelector'
 import type { SessionConfigPick, SessionConfigState } from '../../../api/session-config-types'
@@ -36,7 +37,7 @@ export function useRuntimeModelConfig(
             key,
             runtimeId,
             data: { status: 'offline', options: [] },
-            error: 'Could not load models. Check the agent connection and retry.',
+            error: t('Could not load models. Check the runtime connection and retry.'),
           })
       },
     )
@@ -56,7 +57,6 @@ export function useRuntimeModelConfig(
     slow: false,
     saving: Boolean(shown) && pending,
     error: pending ? undefined : shown?.error,
-    stalled: false,
     queued: undefined,
     open,
     setOpen: (next: boolean) => {

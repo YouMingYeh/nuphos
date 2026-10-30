@@ -30,12 +30,16 @@ export type LocalRuntimeSummary = {
   online?: boolean
   /** The owner's own `claude` sign-in, last reported while away; null when the computer cannot tell. */
   signedIn: boolean | null
+  /** Seen signed in at least once; a host's default agent no one used, or a failed sign-in, has none. */
+  everSignedIn?: true
   /** Provider usage that computer reported; the backend normalizes it. */
   usage?: unknown
   /** When that computer read the usage above. */
   usageAt?: string
   /** Set when this computer is one of the owner's Boxes. */
   box?: { state: BoxState }
+  /** Set when it is a teammate's own computer they share with the viewer. */
+  shared?: { level: 'approve' | 'full' }
 }
 
 export type RuntimeInstance = {

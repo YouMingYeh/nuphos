@@ -4,13 +4,22 @@ import { shell } from 'electron'
 
 // Extension-qualified so this module also resolves under plain node ESM, which
 // is how auth-login.test.ts drives login().
-import { apiUrl } from './api-endpoint.ts'
+import { apiUrl, setApiUrl } from './api-endpoint.ts'
 import { listenOnLoopback } from './auth/callback-server.ts'
-import { apiErrorMessage, writeConfig } from './auth/config.ts'
+import {
+  apiErrorMessage,
+  forgetAccountConfig,
+  listAccountConfigs,
+  parkAccountConfig,
+  requestContext,
+  switchAccountConfig,
+  writeConfig,
+} from './auth/config.ts'
 import { completeLegacyLogin } from './auth/legacy.ts'
 import { completeNativeLogin } from './auth/native.ts'
 import { planLogin } from './auth/plan.ts'
 import { isValidUserInfo } from './auth-status.ts'
+import { CLIENT_VERSION_HEADER, CLIENT_VERSION_VALUE } from './client-version.ts'
 
 import type { AuthStatus, UserInfo } from './auth-status.ts'
 import type { Server } from 'node:http'
@@ -60,7 +69,8 @@ export async function login(): Promise<UserInfo> {
 export async function requestEmailCode(email: string): Promise<void> {
   const res = await fetch(`${apiUrl()}/auth/email/request-code`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // The code email names the app that asked for it.
+    headers: { 'content-type': 'application/json', [CLIENT_VERSION_HEADER]: CLIENT_VERSION_VALUE },
     body: JSON.stringify({ email }),
     signal: AbortSignal.timeout(20_000),
   })
@@ -73,7 +83,8 @@ export async function requestEmailCode(email: string): Promise<void> {
 export async function verifyEmailCode(email: string, code: string): Promise<UserInfo> {
   const res = await fetch(`${apiUrl()}/auth/email/verify-code`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // The app's name labels this sign-in in the account's device list.
+    headers: { 'content-type': 'application/json', [CLIENT_VERSION_HEADER]: CLIENT_VERSION_VALUE },
     body: JSON.stringify({ email, code }),
     signal: AbortSignal.timeout(20_000),
   })
@@ -104,7 +115,50 @@ export async function logout() {
     pendingServer.close()
     pendingServer = null
   }
+  const { api, token } = await requestContext()
+
+  // Signed out here first; ending the session on the server is best effort.
   await writeConfig({})
+  if (token) await endServerSession(api, token)
+}
+
+/**
+ * Points the app at another backend (`null` restores the launch-time one). A
+ * sign-in belongs to the backend that issued it, so it stops being the active
+ * one, on disk as well as in memory: no launch sends it to the new backend.
+ * It stays signed in there, waiting in the account list.
+ */
+export async function changeBackend(url: string | null): Promise<string> {
+  const { api } = await requestContext()
+  const next = setApiUrl(url)
+
+  if (next !== api) await parkAccountConfig(api)
+
+  return next
+}
+
+/** The accounts signed in on this computer, the active one first; never their tokens. */
+export const listAccounts = listAccountConfigs
+
+/** Makes another signed-in account the active one, on the backend that issued its token. */
+export const switchAccount = switchAccountConfig
+
+/** Signs one account out of this app and ends its session on its backend. */
+export async function signOutAccount(key: string): Promise<void> {
+  const active = (await listAccounts()).find((a) => a.active)
+
+  if (active?.key === key) return logout()
+  const ended = await forgetAccountConfig(key)
+
+  if (ended) void endServerSession(ended.api, ended.token)
+}
+
+async function endServerSession(api: string, token: string): Promise<void> {
+  await fetch(`${api}/auth/sessions/current`, {
+    method: 'DELETE',
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => undefined)
 }
 
 export function cancelPendingLogin() {

@@ -7,6 +7,7 @@ import {
 } from '@/lib/agent/auto-mode/store'
 import { wakeOfflineBox } from '@/lib/agent/devices/box-wake'
 import { resolveConversationChatRuntime } from '@/lib/claude-code-preview/conversation-chat-route'
+import { fallBackBeforeTurn } from '@/lib/claude-code-preview/runtime-fallback'
 import { AppError } from '@/lib/errors'
 import { getTeamMembership } from '@/lib/identity'
 import { logError } from '@/lib/observability'
@@ -55,10 +56,9 @@ export async function authorizeThreadDelivery(
     !target ||
     target.sessionId === source.sessionId ||
     target.userId !== data.userId ||
-    target.teamId !== data.teamId ||
-    target.archivedAt
+    target.teamId !== data.teamId
   ) {
-    throw new Error('Target must be another unarchived conversation you own in this team.')
+    throw new Error('Target must be another conversation you own in this team.')
   }
 
   return { source, target }
@@ -227,7 +227,9 @@ async function assertTargetCanRun(target: AgentConversation): Promise<void> {
 // which runs once that turn releases the session. Returns which happened; a
 // message that then does not run is reported to its sender by runTurn.
 export async function startThreadTurn(data: ThreadTurn) {
-  const { source, target } = await authorizeThreadDelivery(data)
+  const { source, target: delivered } = await authorizeThreadDelivery(data)
+  // A thread's turn acts as its owner.
+  const target = await fallBackBeforeTurn(delivered, delivered.userId)
 
   await assertTargetCanRun(target)
   // Lazy so importing the tools does not pull in the route graph.

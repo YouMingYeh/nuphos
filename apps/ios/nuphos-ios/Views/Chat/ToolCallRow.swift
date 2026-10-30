@@ -176,6 +176,7 @@ struct ToolRunView: View {
 
     @State private var userOpen: Bool?
     @State private var attentionFor: String?
+    @Environment(\.transcriptReadingInteraction) private var readingInteraction
 
     private var tools: [ChatPart.ToolPart] { items.compactMap(\.tool) }
     private var latest: ChatPart.ToolPart? { tools.last }
@@ -186,7 +187,7 @@ struct ToolRunView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let latest {
                 Button {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) { userOpen = !open }
+                    disclose(readingInteraction) { userOpen = !open }
                 } label: {
                     HStack(spacing: 6) {
                         Text(ToolLineRow.label(for: latest))
@@ -311,36 +312,37 @@ struct ElapsedBadge: View {
 }
 
 /// Finished intermediate work — reasoning and tool calls before the final
-/// answer — folded under "Worked for Xs".
+/// answer — folded under a "Worked for Xs" chapter rule, like the desktop's
+/// `CollapsedWorkView`.
 struct WorkGroup: View {
     let rows: [ChatRow]
     var duration: TimeInterval?
     var content: (ChatRow) -> AnyView
 
     @State private var expanded = ProcessInfo.processInfo.arguments.contains("-expand-all")
+    @Environment(\.transcriptReadingInteraction) private var readingInteraction
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) { expanded.toggle() }
+                disclose(readingInteraction) { expanded.toggle() }
             } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "wrench.and.screwdriver").font(Theme.Text.caption.weight(.semibold))
-                    Text(title).font(Theme.Text.label.weight(.medium))
-                    Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                    Text(title)
                     Image(systemName: "chevron.right")
                         .font(Theme.Text.micro.weight(.bold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .opacity(expanded ? 0.6 : 0.35)
+                    Rectangle().fill(Theme.hairline).frame(height: 1).padding(.leading, 6)
                 }
-                .foregroundStyle(Theme.body)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(Theme.chatSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .font(Theme.Text.label)
+                .foregroundStyle(Theme.muted)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            Collapsible(expanded: expanded) {
+            if expanded {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(rows) { row in content(row) }
                 }

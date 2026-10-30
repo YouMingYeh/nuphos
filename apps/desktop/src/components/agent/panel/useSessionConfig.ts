@@ -2,16 +2,18 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 
 import { api } from '../../../api'
 
+import { newChatChoiceKey, saveNewChatChoice, sentChatChoice } from './newChatChoice'
 import { SessionConfigSync } from './sessionConfigSync'
 
 import type { SessionConfigSelection } from '../../../api/session-config-types'
 
-export type ModelSession = { sessionId: string; teamId: string }
+export type ModelSession = { sessionId: string; teamId: string; runtimeId?: string }
 
 export function useSessionConfig(session: ModelSession | undefined, streaming: boolean) {
   const [open, setOpen] = useState(false)
   const sessionId = session?.sessionId
   const teamId = session?.teamId
+  const runtimeId = session?.runtimeId
   const sync = useMemo(
     () =>
       new SessionConfigSync({
@@ -49,5 +51,14 @@ export function useSessionConfig(session: ModelSession | undefined, streaming: b
       void sync.select(selection)
     },
     refresh: () => void sync.refresh(),
+    /** Cmd+N starts from the chat a message was last sent in. */
+    wrapSend:
+      <A extends unknown[]>(send: (...args: A) => void) =>
+      (...args: A) => {
+        const choice = sentChatChoice(runtimeId, state.data)
+
+        if (choice) saveNewChatChoice(newChatChoiceKey(teamId), choice)
+        send(...args)
+      },
   }
 }

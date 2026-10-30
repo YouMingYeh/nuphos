@@ -28,8 +28,8 @@ export function startAgentRunOwnership(
     onCancellationRequested?: () => void
     heartbeatMs?: number
     actorUserId?: string
-    humanTurn?: boolean
     teamId?: string
+    runtimeOwned?: boolean
   } = {},
 ): () => void {
   if (!redisEnabled()) {
@@ -46,15 +46,18 @@ export function startAgentRunOwnership(
   const state = { released: false, cancellationDelivered: false }
   const cancellationStillPending = () => !state.released && !state.cancellationDelivered
 
+  // A turn the runtime started fills a free guard but never takes one over
+  // from a backend turn, so the guard keeps naming the turn that claimed it.
+  const setField = options.runtimeOwned ? 'hsetnx' : 'hset'
   const write = () =>
     withRedis((c) =>
       c
         .pipeline()
         .set(oKey, replicaId, 'EX', OWNER_TTL_SEC)
-        .hset(aKey, 'streamId', streamId)
-        .hset(aKey, 'actorUserId', options.actorUserId ?? userId)
-        .hset(aKey, 'humanTurn', options.humanTurn === false ? '0' : '1')
-        .hset(aKey, 'teamId', options.teamId ?? '')
+        [setField](aKey, 'streamId', streamId)
+        [setField](aKey, 'actorUserId', options.actorUserId ?? userId)
+        [setField](aKey, 'teamId', options.teamId ?? '')
+        [setField](aKey, 'runtimeOwned', options.runtimeOwned ? '1' : '0')
         .hsetnx(aKey, 'startedAt', String(Date.now()))
         // The hash rides the heartbeat, so a live run keeps refreshing it; only
         // an unreleased run lets it lapse (self-healing the lock).
@@ -264,18 +267,18 @@ export async function getActiveAgentRunForSession(userId: string, sessionId: str
   if (!redisEnabled()) return null
   const aKey = activeRunKey(userId, sessionId)
   const result = await withRedis((c) =>
-    c.hmget(aKey, 'streamId', 'startedAt', 'actorUserId', 'humanTurn'),
+    c.hmget(aKey, 'streamId', 'startedAt', 'actorUserId', 'runtimeOwned'),
   )
 
   if (!result) return null
-  const [streamId, startedAt = null, actorUserId = null, humanTurn] = result
+  const [streamId, startedAt = null, actorUserId = null, runtimeOwned] = result
 
   if (!streamId) return null
   if (await guardIsAbandoned(userId, sessionId, streamId)) {
     if (await sweepAbandonedGuard(userId, sessionId, streamId)) return null
   }
 
-  return { streamId, startedAt, actorUserId, humanTurn: humanTurn !== '0' }
+  return { streamId, startedAt, actorUserId, runtimeOwned: runtimeOwned === '1' }
 }
 
 /** Bounded scan; recovery must also work while every desktop is disconnected. */

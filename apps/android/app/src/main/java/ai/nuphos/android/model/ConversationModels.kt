@@ -54,12 +54,16 @@ data class AgentConversation(
     val readSeq: JsonValue? = null,
     val unread: JsonValue? = null,
     val parentSessionId: String? = null,
+    val canManage: Boolean? = null,
+    val agentRuntime: String? = null,
+    val runtimeId: String? = null,
+    val runtimeLabel: String? = null,
 ) {
     @Transient
     val id: String get() = sessionId
 
     val displayTitle: String
-        get() = title.ifEmpty { firstMessage.ifEmpty { "Untitled chat" } }
+        get() = title.ifEmpty { firstMessage.ifEmpty { "Untitled agent" } }
 
     val isArchived: Boolean get() = archivedAt != null
 
@@ -90,7 +94,12 @@ data class AgentConversationsPage(
     val conversations: List<AgentConversation> = emptyList(),
     val nextCursor: String? = null,
     val hasMore: Boolean = false,
-)
+    val parents: List<AgentConversation>? = null,
+) {
+    /** Authorized ancestors supplied by the server; pagination stays on conversations. */
+    val rows: List<AgentConversation>
+        get() = (conversations + parents.orEmpty()).distinctBy { it.sessionId }
+}
 
 @Serializable
 data class AgentConversationDetail(
@@ -115,7 +124,13 @@ data class AgentConversationDetail(
     @Serializable(with = InstantAsStringSerializerNullable::class)
     val archivedAt: Instant? = null,
     val credentialAccess: JsonValue? = null,
+    val timelineEvents: List<TimelineEvent> = emptyList(),
 ) {
+    @Serializable
+    data class TimelineEvent(
+        @Serializable(with = InstantAsStringSerializer::class) val at: Instant,
+        val text: String,
+    )
     @Serializable
     data class ActiveRun(
         val streamId: String,
@@ -203,4 +218,10 @@ object PlanLink {
         if (parts[1].isEmpty() || parts[3].isEmpty()) return null
         return Target(parts[1], parts[3])
     }
+}
+
+/** The two history orders exposed by the native clients. */
+enum class ConversationSort(val raw: String, val title: String) {
+    Created("created", "Date created"),
+    Activity("activity", "Recent activity"),
 }

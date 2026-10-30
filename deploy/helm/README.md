@@ -1,7 +1,6 @@
 # Helm chart
 
-[`nuphos/`](nuphos) deploys the same stack as the [Zeabur template](../zeabur/README.md)
-onto any Kubernetes cluster: authenticated single-node MongoDB, RustFS, the
+[`nuphos/`](nuphos) deploys Nuphos onto any Kubernetes cluster: authenticated single-node MongoDB, RustFS, the
 released backend, and an optional Claude Code runtime. There is no Redis, so
 the backend runs as one replica in in-memory mode.
 
@@ -10,8 +9,8 @@ the backend runs as one replica in in-memory mode.
 - Kubernetes 1.27+ with a default StorageClass and an Ingress controller.
 - Three DNS names with TLS: backend, storage and runtime. Presigned file URLs
   name the storage host, so Desktop and the runtime must reach it directly.
-- A Zeabur Email or Resend API key and a sender on a domain verified with that
-  provider. Production sign-in sends the code by email and never logs it.
+- A Resend API key and a sender on a domain verified in Resend.
+  Production sign-in sends the code by email and never logs it.
 - An amd64 node for the runtime image.
 
 ## Install
@@ -25,8 +24,7 @@ storage:
 runtime:
   url: https://runtime.nuphos.example.com
 email:
-  zsendApiKey: <zsend-api-key>
-  # Or: provider: resend, with resendApiKey: <resend-api-key>
+  resendApiKey: <resend-api-key>
   from: Nuphos <noreply@example.com>
 ingress:
   className: nginx
@@ -57,13 +55,25 @@ upgrade, and leaves the Secret behind on uninstall. Renderers without cluster
 access (`helm template`, Argo CD, Flux with `--dry-run`) regenerate them on every
 render. For those, set `secrets.existingSecret` to a Secret you manage with the
 keys `NUPHOS_JWT_SECRET`, `MONGO_PASSWORD`, `STORAGE_SECRET_KEY`,
-`RUNTIME_AUTH_KEY`, `RUNTIME_TOKEN_ENCRYPTION_KEY` and `ZSEND_API_KEY` or
-`RESEND_API_KEY` (whichever `email.provider` selects). Keep the Mongo password
+`RUNTIME_AUTH_KEY`, `RUNTIME_TOKEN_ENCRYPTION_KEY` and `RESEND_API_KEY`. Keep the Mongo password
 alphanumeric: it is placed in the connection URI as is.
 `RUNTIME_TOKEN_ENCRYPTION_KEY` is base64 of 32 random bytes
 (`openssl rand -base64 32`). It seals the runtime credentials the backend
 stores, so changing it disconnects every runtime. `extraObjects` renders any manifest with the release, such
 as an `ExternalSecret` that fills that Secret.
+
+## Upgrading to 0.2.0
+
+Chart 0.2.0 removes ZSend (Zeabur Email); sign-in codes are sent only through
+Resend. Before you upgrade, create a Resend API key and verify the domain of
+`email.from` in Resend, then:
+
+- set `email.resendApiKey`, and remove `email.provider` and `email.zsendApiKey`; or
+- with `secrets.existingSecret`, add `RESEND_API_KEY` to that Secret.
+
+Without the key, rendering fails (`email.resendApiKey is required`) or the
+backend pod fails with `CreateContainerConfigError`. With an unverified sender,
+sign-in codes are not delivered.
 
 ## Isolation
 
@@ -72,7 +82,7 @@ reads only its own password from the Secret, and a NetworkPolicy admits only
 the backend to MongoDB. The policy needs a CNI that enforces NetworkPolicy. For
 stronger separation, set `runtime.enabled=false` and run the runtime on other
 infrastructure, for example with the
-[Zeabur runtime template](../zeabur/runtime-template.yaml).
+[Railway runtime project](../railway/README.md#deploy-the-runtime-project).
 
 The Mongo container runs as root so it can own its keyfile, the same as the
 official image's entrypoint. The release's namespace therefore cannot enforce

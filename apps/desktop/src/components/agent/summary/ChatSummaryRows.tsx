@@ -1,33 +1,48 @@
 import { clsx } from 'clsx'
 import { ArrowUpRight, ExternalLink, Link2, MoreVertical } from 'lucide-react'
 
+import { t } from '../../../i18n'
 import { copyLinkWithFeedback } from '../../../lib/copyLink'
-import { chatRowIndicator } from '../../../lib/runtimeExecution'
+import { ResourceMark } from '../../sidebar/ResourceMark'
+import { resourceStatus } from '../../sidebar/sessionResourcePresentation'
 import { resourceStyle } from '../../sidebar/sessionResourceStyle'
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '../../ui/menu'
 import { toast } from '../../ui/toast'
-import { AgentProviderIcon } from '../panel/icons'
+import { AgentAvatar } from '../AgentAvatar'
 
 import { changeSubtitle, changeTitle } from './chatSummaryModel'
 
 import type { AgentConversation } from '../../../api/agent-types'
 import type { SessionResource } from '../../../api/session-resource-types'
-import type { RuntimeExecution } from '../../../lib/runtimeExecution'
-import type { ReactNode } from 'react'
+import type { SubAgentState } from '../../../lib/subAgentState'
+import type { ReactNode, Ref } from 'react'
 
 export const sectionClass = 'rounded-xl border border-zGray-800 px-3.5 py-3'
 const focusClass =
   'outline-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-current'
 const hoverRowClass =
   '-mx-1.5 rounded-md px-1.5 transition-colors hover:bg-zGray-800/50 motion-reduce:transition-none'
-const rowFocusClass =
-  'outline-none focus-visible:bg-zGray-800/50 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-zViolet-500/70'
 
-/** A titled block of rows. */
-export function SummarySection({ title, children }: { title: string; children: ReactNode }) {
+export const focusRingClass =
+  'outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-zViolet-500/70'
+const rowFocusClass = `focus-visible:bg-zGray-800/50 ${focusRingClass}`
+
+/** A titled block of rows; `header` sits under the title, above the rows. */
+export function SummarySection({
+  title,
+  header,
+  ref,
+  children,
+}: {
+  title: string
+  header?: ReactNode
+  ref?: Ref<HTMLElement>
+  children: ReactNode
+}) {
   return (
-    <section className={sectionClass} aria-label={title}>
+    <section ref={ref} className={sectionClass} aria-label={title}>
       <h3 className="text-[13px] font-medium text-main">{title}</h3>
+      {header}
       <div className="flex flex-col gap-0.5 pt-2">{children}</div>
     </section>
   )
@@ -83,8 +98,8 @@ function capitalize(text: string): string {
 
 function copyLink(url: string) {
   void copyLinkWithFeedback(url, (text) => navigator.clipboard.writeText(text), {
-    onSuccess: () => toast.success('Link copied', undefined, { timeoutMs: 1200, dedupe: false }),
-    onError: () => toast.error('Could not copy link', 'Clipboard was blocked.'),
+    onSuccess: () => toast.success(t('Link copied'), undefined, { timeoutMs: 1200, dedupe: false }),
+    onError: () => toast.error(t('Could not copy link'), t('Clipboard was blocked.')),
   })
 }
 
@@ -111,7 +126,7 @@ export function ChangeRow({
       </span>
       <button
         type="button"
-        title={`${title} · ${resource.state}`}
+        title={`${title} · ${resourceStatus(resource)}`}
         onClick={(event) => onOpen(resource.url, event.metaKey)}
         className={clsx(
           'min-w-0 flex-1 rounded text-left',
@@ -120,13 +135,16 @@ export function ChangeRow({
         )}
       >
         <span className="block truncate text-[13px] leading-5 text-main">{title}</span>
-        <span className="block truncate text-[12px] leading-5 text-tertiary">
-          {changeSubtitle(resource)} · {capitalize(resource.state)}
+        <span className="flex min-w-0 items-center gap-1 text-[12px] leading-5 text-tertiary">
+          <span className="truncate">
+            {changeSubtitle(resource)} · {capitalize(resourceStatus(resource))}
+          </span>
+          <ResourceMark resource={resource} />
         </span>
       </button>
       <Menu>
         <MenuTrigger
-          aria-label={`More actions for ${title}`}
+          aria-label={t('More actions for {title}', { title })}
           className={clsx(
             'mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md text-tertiary transition-colors hover:bg-zGray-800/80 hover:text-main data-[popup-open]:bg-zGray-800/80 data-[popup-open]:text-main motion-reduce:transition-none',
             focusClass,
@@ -139,16 +157,16 @@ export function ChangeRow({
             icon={<ArrowUpRight className="h-3.5 w-3.5" />}
             onClick={() => onOpen(resource.url, false)}
           >
-            Open
+            {t('Open')}
           </MenuItem>
           <MenuItem
             icon={<ExternalLink className="h-3.5 w-3.5" />}
             onClick={() => onOpen(resource.url, true)}
           >
-            Open in browser
+            {t('Open in browser')}
           </MenuItem>
           <MenuItem icon={<Link2 className="h-3.5 w-3.5" />} onClick={() => copyLink(resource.url)}>
-            Copy link
+            {t('Copy link')}
           </MenuItem>
         </MenuContent>
       </Menu>
@@ -159,31 +177,36 @@ export function ChangeRow({
 /** A thread this chat started; running ones say so. */
 export function ThreadRow({
   conversation,
-  runtimeState,
+  state,
   onOpen,
 }: {
   conversation: AgentConversation
-  runtimeState: RuntimeExecution | undefined
+  state: SubAgentState
   onOpen: (sessionId: string) => void
 }) {
-  // The list that listed this thread published its state to the shared store.
-  const indicator = chatRowIndicator(runtimeState, false)
-  const running = indicator === 'turn' || indicator === 'background'
+  let note: ReactNode = t('Done')
+
+  if (state === 'waiting') note = <span className="text-warning">{t('Waiting for you')}</span>
+  else if (state === 'running')
+    note = (
+      <span className="flex items-center gap-1.5">
+        <span aria-hidden className="size-1.5 rounded-full bg-success" />
+        {t('Running')}
+      </span>
+    )
 
   return (
     <SummaryRow
-      icon={<AgentProviderIcon provider={conversation.agentRuntime} className="size-3.5" />}
-      label={conversation.title || conversation.firstMessage || 'Untitled chat'}
-      note={
-        running ? (
-          <span className="flex items-center gap-1.5">
-            <span aria-hidden className="size-1.5 rounded-full bg-success" />
-            Running
-          </span>
-        ) : (
-          'Done'
-        )
+      icon={
+        <AgentAvatar
+          agentId={conversation.sessionId}
+          avatar={conversation.avatar}
+          provider={conversation.agentRuntime}
+          size={16}
+        />
       }
+      label={conversation.title || conversation.firstMessage || t('Untitled agent')}
+      note={note}
       onClick={() => onOpen(conversation.sessionId)}
     />
   )

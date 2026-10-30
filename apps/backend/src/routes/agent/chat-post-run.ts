@@ -7,12 +7,13 @@
 import { agentConversations } from '@/lib/agent/db'
 import { trackAgentProducer } from '@/lib/agent/producer-drain'
 import { runtimeModelCatalog } from '@/lib/claude-code-preview/runtime-models'
-import { offeredSessionConfig } from '@/lib/claude-code-preview/session-config'
+import { offeredSessionConfig } from '@/lib/claude-code-preview/session-config-catalog'
 import { mirrorAppTurnToDiscord } from '@/routes/discord/turn'
 
 import { isFirstTurn } from './chat-permission-mode'
 import { runClaudeCodePreviewChatTurn } from './chat-preview-turn'
 import { beginSlackBoundTurnDelivery } from './chat-slack-bound'
+import { decisionReplyOf } from './decision-reply'
 import {
   appendAgentRunDone,
   appendAgentRunError,
@@ -98,7 +99,7 @@ export function launchAcceptedChatTurn(args: {
       // The user-turn persist joins the parallel prep group: handleChatRequest
       // awaits it before anything that needs the write to have landed
       // (default-credential persist on a new conversation, telemetry, title
-      // generation), overlapping it with memory recall.
+      // generation), overlapping it with the rest of turn prep.
       const isNewConversationPromise = persistAcceptedConversationTurn({
         sessionId,
         userId: run.userId,
@@ -180,6 +181,8 @@ export function launchAcceptedChatTurn(args: {
           if (discordSink) attachFrameSink(next, discordSink.frameSink)
         },
         localToolsEnabled: chatCtx.localToolsEnabled,
+        explicitDecisionReplies: body.clientCapabilities?.decisionReplies === true,
+        decisionReplyTo: decisionReplyOf(body),
         clientResendsRefusal: body.clientCapabilities?.resendsRefusal === true,
         ...(args.queued ? { queued: args.queued } : {}),
         ...(body.continueAfterInterruption

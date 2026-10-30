@@ -49,8 +49,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.content.ReceiveContentListener
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.InputTransformation
+import androidx.compose.foundation.text.input.KeyboardActionHandler
+import kotlinx.coroutines.Job
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.outlined.Photo
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
@@ -73,6 +84,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -110,6 +122,7 @@ import ai.nuphos.android.model.ComposerAttachment
 import ai.nuphos.android.model.ComposerSubmission
 import ai.nuphos.android.model.CredentialSelection
 import ai.nuphos.android.model.PermissionMode
+import ai.nuphos.android.ui.components.AgentAvatar
 import ai.nuphos.android.session.RuntimeSelections
 import ai.nuphos.android.ui.LocalAgentStore
 import ai.nuphos.android.ui.agent.AgentChip
@@ -130,9 +143,10 @@ import kotlin.math.abs
 
 /**
  * Collapsed this is a single-line capsule; once focused (or holding
- * text/attachments) it opens into rows: a drag handle, optional controls,
- * the input on its own line, attachment tiles, then + and send/stop.
+ * text/attachments) it opens into runtime controls, the input on its own line,
+ * attachment tiles, then Photos/Files/Paste and send/stop.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatComposer(
     isStreaming: Boolean,
@@ -159,22 +173,52 @@ fun ChatComposer(
     modifier: Modifier = Modifier,
 ) {
     val store = LocalAgentStore.current
+    val context = LocalContext.current
+    val incomingShares = (context.applicationContext as ai.nuphos.android.NuphosApplication).incomingShares
     val scope = rememberCoroutineScope()
+    val shareReady by incomingShares.ready.collectAsState()
+    val shareRevision by incomingShares.revision.collectAsState()
+    val storageError by incomingShares.persistenceError.collectAsState()
+    // Reading the projection revision makes restored/committed text observable without any disk access.
+    @Suppress("UNUSED_VARIABLE") val observedShareRevision = shareRevision
+    val effectiveDraftingEnabled = draftingEnabled && shareReady && (draft == null || incomingShares.isBound(draft.key.accountId))
+    var savingSend by remember { mutableStateOf(false) }
+    val latestSendAllowed by rememberUpdatedState(effectiveDraftingEnabled && canSubmit)
+    val latestSendKey by rememberUpdatedState(draft?.key)
+    val latestOnSend by rememberUpdatedState(onSend)
     var showModel by remember(modelSettings) { mutableStateOf(false) }
-    var picking by remember { mutableStateOf(false) }
-    var pickerError by remember { mutableStateOf<String?>(null) }
+    var picking by remember(draft) { mutableStateOf(false) }
+    var pickerError by remember(draft) { mutableStateOf<String?>(null) }
     var focused by remember { mutableStateOf(false) }
     var localText by remember(draft) { mutableStateOf("") }
-    val text = draft?.text ?: localText
+    val fieldState = remember(draft, effectiveDraftingEnabled) {
+        val initial = if (effectiveDraftingEnabled) draft?.let { incomingShares.text(it.key) ?: it.text } ?: localText else ""
+        TextFieldState(initial, TextRange(initial.length))
+    }
+    val text = fieldState.text.toString()
     fun updateText(value: String) {
-        if (!draftingEnabled) return
+        if (!effectiveDraftingEnabled || savingSend) return
+        try { draft?.key?.let { incomingShares.writeText(it, value) } }
+        catch (_: Exception) { pickerError = "Could not save this draft. Free storage and try again."; return }
+        fieldState.edit {
+            replace(0, length, value)
+            this.selection = TextRange(value.length)
+        }
         if (draft != null) draft.write(value) else localText = value
     }
-    var field by remember(draft) { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
-    // External draft restoration must not reset the selection/composition on each keystroke.
-    val fieldValue = if (field.text == text) field else TextFieldValue(text, TextRange(text.length))
+    val externalText = if (effectiveDraftingEnabled) draft?.let { incomingShares.text(it.key) ?: it.text } ?: localText else ""
+    LaunchedEffect(draft, externalText) {
+        if (effectiveDraftingEnabled && draft != null && incomingShares.text(draft.key) != null) draft.write(externalText)
+        if (externalText != fieldState.text.toString()) {
+            fieldState.edit {
+                replace(0, length, externalText)
+                this.selection = TextRange(externalText.length)
+            }
+        }
+    }
+    val fieldValue = TextFieldValue(text, fieldState.selection)
     var dismissedAt by remember(draft, mentions?.teamId) { mutableIntStateOf(-1) }
-    val mentionQuery = if (draftingEnabled && focused && mentions != null) SessionMention.query(fieldValue) else null
+    val mentionQuery = if (effectiveDraftingEnabled && focused && mentions != null) SessionMention.query(fieldValue) else null
     val activeMention = mentionQuery?.takeUnless { text.lastIndexOf('@') == dismissedAt }
     var mentionRows by remember(activeMention, draft, mentions) { mutableStateOf<List<ai.nuphos.android.model.AgentConversation>>(emptyList()) }
     var mentionLoading by remember(activeMention, draft, mentions) { mutableStateOf(activeMention != null) }
@@ -221,12 +265,17 @@ fun ChatComposer(
             if (currentCoroutineContext().isActive) devicesLoading = false
         }
     }
-    val attachments = remember(draft) { mutableStateListOf<ComposerAttachment>() }
-    DisposableEffect(attachments) {
+    val attachments = remember(draft, effectiveDraftingEnabled) {
+        mutableStateListOf<ComposerAttachment>().apply { if (effectiveDraftingEnabled) draft?.key?.let { addAll(incomingShares.attachments(it)) } }
+    }
+    var attachmentJob by remember(draft) { mutableStateOf<Job?>(null) }
+    DisposableEffect(draft, attachments) {
         onDispose {
+            attachmentJob?.cancel()
             // Successful Send clears this list after ownership moves to the session.
-            attachments.forEach { it.releaseOwnedCopy() }
+            val abandoned = attachments.toList()
             attachments.clear()
+            incomingShares.releaseLater(abandoned)
         }
     }
     var menu by remember { mutableStateOf(false) }
@@ -235,16 +284,14 @@ fun ChatComposer(
     var showMode by remember { mutableStateOf(false) }
     var collapsedByUser by remember { mutableStateOf(false) }
     var handleDrag by remember { mutableFloatStateOf(0f) }
-    val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val injectedVoice = LocalVoiceServices.current
     val voiceServices = remember(context, injectedVoice) { injectedVoice ?: deviceVoiceServices(context) }
     val latestText by rememberUpdatedState(text)
     val latestWrite by rememberUpdatedState<(String) -> Unit> { words ->
-        if (draftingEnabled) {
+        if (effectiveDraftingEnabled) {
             val appended = appendDictation(latestText, words)
-            field = TextFieldValue(appended, TextRange(appended.length))
             updateText(appended)
         }
     }
@@ -256,7 +303,7 @@ fun ChatComposer(
         permissionTarget = null
     }
     fun startVoice() {
-        if (voice.active || !draftingEnabled || !canSubmit || picking) return
+        if (voice.active || !effectiveDraftingEnabled || !canSubmit || picking) return
         try {
             if (voiceServices.settings.key() == null) { askingVoiceKey = true; return }
             focusManager.clearFocus()
@@ -281,7 +328,7 @@ fun ChatComposer(
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); voice.cancel() }
     }
-    LaunchedEffect(draftingEnabled, canSubmit) { if (!draftingEnabled || !canSubmit) { voice.cancel(); askingVoiceKey = false } }
+    LaunchedEffect(effectiveDraftingEnabled, canSubmit) { if (!effectiveDraftingEnabled || !canSubmit) { attachmentJob?.cancel(); voice.cancel(); askingVoiceKey = false } }
     BackHandler(enabled = voice.active) { voice.cancel() }
     if (askingVoiceKey) OpenAIKeyDialog(voiceServices, onDismiss = { askingVoiceKey = false }, onSaved = { askingVoiceKey = false; startVoice() })
     voice.error?.let { message ->
@@ -291,7 +338,8 @@ fun ChatComposer(
     val hasText = text.isNotBlank()
     val hasPayload = hasText || attachments.isNotEmpty()
     val expanded = (focused || hasPayload) && !collapsedByUser
-    LaunchedEffect(rejectedSubmission, text.isEmpty(), attachments.isEmpty()) {
+    LaunchedEffect(rejectedSubmission, text.isEmpty(), attachments.isEmpty(), savingSend) {
+        if (savingSend) return@LaunchedEffect
         if (rejectedSubmission != null && text.isEmpty() && attachments.isEmpty()) {
             updateText(rejectedSubmission.text)
             attachments.addAll(rejectedSubmission.attachments)
@@ -299,13 +347,14 @@ fun ChatComposer(
         }
     }
 
-    fun loadSelection(uris: List<Uri>, images: Boolean) {
-        if (picking) return
+    fun loadSelection(uris: List<Uri>, images: Boolean, permissionOwner: Any? = null) {
+        if (!effectiveDraftingEnabled || savingSend || !canSubmit || voice.active) return
+        if (picking) { pickerError = "Wait for the current files to finish loading, then try again."; return }
         if (uris.isEmpty()) return
         picking = true
         pickerError = null
         val existing = attachments.toList()
-        scope.launch {
+        attachmentJob = scope.launch {
             var loaded: List<ComposerAttachment> = emptyList()
             try {
                 require(existing.size + uris.size <= AttachmentTransfers.MAX_FILES) { "Select at most 20 files." }
@@ -322,20 +371,105 @@ fun ChatComposer(
                 loaded.forEach { it.releaseOwnedCopy() }
                 if (e is CancellationException) throw e
                 pickerError = e.message ?: "Could not read the selected files."
-            } finally { picking = false }
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(permissionOwner)
+                picking = false
+            }
         }
     }
     val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { loadSelection(it, true) }
     val files = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { loadSelection(it, false) }
 
+    val receiveContent = ReceiveContentListener { content ->
+        if (!effectiveDraftingEnabled || !canSubmit || voice.active) content else {
+            val uris = mutableListOf<Uri>()
+            val remaining = content.consume { item ->
+                val uri = item.uri
+                if (uri?.scheme == "content") {
+                    uris += uri
+                    true
+                } else false
+            }
+            if (uris.isNotEmpty()) loadSelection(uris, false, content)
+            remaining
+        }
+    }
+
+    val incomingShare by incomingShares.state.collectAsState()
+    LaunchedEffect(incomingShare, draft, effectiveDraftingEnabled, store.selectedTeam?.id, savingSend) {
+        val shared = incomingShare ?: return@LaunchedEffect
+        val lease = draft ?: return@LaunchedEffect
+        if (savingSend || !effectiveDraftingEnabled || store.selectedTeam?.id != lease.key.teamId || shared.destination != lease.key || shared.loading || shared.error != null) return@LaunchedEffect
+        var staged = emptyList<ComposerAttachment>()
+        val before = attachments.toList()
+        try {
+            require(before.size + shared.attachments.size <= AttachmentTransfers.MAX_FILES)
+            if (before.isNotEmpty() || shared.attachments.isNotEmpty()) AttachmentTransfers().retain(before + shared.attachments)
+            withContext(Dispatchers.IO) {
+                val work = currentCoroutineContext()
+                staged = incomingShares.prepare(before + shared.attachments) { work.ensureActive() }
+            }
+            withContext(Dispatchers.Main.immediate) {
+                if (!effectiveDraftingEnabled || store.selectedTeam?.id != lease.key.teamId || incomingShares.state.value?.id != shared.id ||
+                    attachments.map { it.id } != before.map { it.id }) throw CancellationException("Draft changed")
+                val merged = listOf(fieldState.text.toString(), shared.text).filter { it.isNotEmpty() }.joinToString("\n\n")
+                // Durable transaction consumes the share and publishes text+files together before any preference update.
+                val receivingJob = currentCoroutineContext()
+                if (!incomingShares.consumed(shared.id, lease.key, merged, staged) {
+                        // Publish the IO-committed projection and update this composer before clearing the pending-share flow.
+                        if (receivingJob.isActive && effectiveDraftingEnabled && store.selectedTeam?.id == lease.key.teamId &&
+                            attachments.map { it.id } == before.map { it.id } && lease.write(merged)) {
+                            fieldState.edit { replace(0, length, merged); this.selection = TextRange(merged.length) }
+                            attachments.clear()
+                            attachments.addAll(staged)
+                            incomingShares.releaseLater(before.filter { old -> staged.none { it === old } })
+                        }
+                    }) throw CancellationException("Share changed")
+            }
+        } catch (failure: Exception) {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main.immediate) {
+                // Queue cleanup after any already-enqueued consumption/deletion, so cancellation cannot unlink an in-flight commit.
+                incomingShares.releaseUnowned(staged.filter { file -> before.none { it === file } && shared.attachments.none { it === file } })
+                if (failure !is CancellationException)
+                    incomingShares.failed(shared.id, "Could not save this share. Check the draft limits and free storage, then try again.")
+            }
+            if (failure is CancellationException) throw failure
+        }
+    }
+
     val resolvedSelection = selection ?: store.credentialSelection
     val resolvedMode = mode ?: store.permissionMode
 
     fun send() {
-        if (!hasPayload || !canSubmit || !draftingEnabled || picking || voice.active) return
-        if (!onSend(ComposerSubmission(text.trim(), attachments.toList()))) return
-        if (draft != null) draft.submitted(true, text) else localText = ""
-        attachments.clear()
+        if (!hasPayload || !canSubmit || !effectiveDraftingEnabled || picking || savingSend || incomingShare != null || voice.active) return
+        val key = draft?.key
+        val submittedText = text
+        val submittedFiles = attachments.toList()
+        savingSend = true
+        scope.launch {
+            var accepted = false
+            try {
+                key?.let { incomingShares.checkWritable(it) }
+                if (!latestSendAllowed || latestSendKey != key || incomingShares.state.value != null ||
+                    (key != null && (!incomingShares.isBound(key.accountId) || store.selectedTeam?.id != key.teamId)) ||
+                    fieldState.text.toString() != submittedText || attachments.map { it.id } != submittedFiles.map { it.id }) return@launch
+                accepted = latestOnSend(ComposerSubmission(submittedText.trim(), submittedFiles))
+                if (accepted) {
+                    if (key != null) incomingShares.sent(key, submittedFiles) else incomingShares.handoff(submittedFiles)
+                }
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                pickerError = if (accepted) "Message accepted, but saved draft cleanup failed. Do not resend it."
+                    else "Could not update saved drafts. Free storage before sending."
+            } finally {
+                if (accepted) {
+                    if (draft != null) draft.submitted(true, submittedText) else localText = ""
+                    if (fieldState.text.toString() == submittedText) fieldState.edit { replace(0, length, "") }
+                    attachments.removeAll { file -> submittedFiles.any { it.id == file.id } }
+                }
+                savingSend = false
+            }
+        }
     }
 
     fun collapse() {
@@ -371,15 +505,15 @@ fun ChatComposer(
             if (activeMention != null && mentions != null) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (devices == null) "My chats" else "Mention", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                        Text(if (devices == null) "My agents" else "Mention", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
                         IconButton(onClick = { dismissedAt = text.lastIndexOf('@') }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Outlined.Close, contentDescription = if (devices == null) "Dismiss chat mentions" else "Dismiss mentions", modifier = Modifier.size(16.dp))
+                            Icon(Icons.Outlined.Close, contentDescription = if (devices == null) "Dismiss agent mentions" else "Dismiss mentions", modifier = Modifier.size(16.dp))
                         }
                     }
                     Column(Modifier.heightIn(max = 80.dp).verticalScroll(rememberScrollState())) {
                     if (devices != null && devices.teamId == mentions.teamId) {
-                        Text("My computers", style = MaterialTheme.typography.labelSmall)
-                        Text("Selecting allows this conversation to operate the computer.", style = MaterialTheme.typography.labelSmall)
+                        Text("Computers", style = MaterialTheme.typography.labelSmall)
+                        Text("Selecting allows this agent to operate the computer.", style = MaterialTheme.typography.labelSmall)
                         val computers = DeviceMention.results(deviceRows, activeMention, resolvedSelection)
                         when {
                             devicesLoading -> Text("Loading computers…", style = MaterialTheme.typography.bodySmall)
@@ -387,11 +521,10 @@ fun ChatComposer(
                             computers.isEmpty() -> Text("No matching computers", style = MaterialTheme.typography.bodySmall)
                             else -> computers.forEach { device ->
                                 Column(Modifier.fillMaxWidth().clickable(enabled = !device.unavailable, role = Role.Button) {
-                                    if (SessionMention.query(fieldValue) == activeMention && draftingEnabled) {
+                                    if (SessionMention.query(fieldValue) == activeMention && effectiveDraftingEnabled) {
                                         // Do not insert text on rejected selection; never interpret typed @text as IAM.
                                         if (devices.pick(device)) {
                                             val inserted = SessionMention.insert(text, "@" + device.label)
-                                            field = TextFieldValue(inserted, TextRange(inserted.length))
                                             updateText(inserted)
                                         } else devicePickFailed = true
                                     }
@@ -413,26 +546,27 @@ fun ChatComposer(
                             }
                         }
                         if (devicePickFailed) Text("Computer selection unavailable. IAM was not changed.", style = MaterialTheme.typography.bodySmall)
-                        Text("My chats", style = MaterialTheme.typography.labelSmall)
+                        Text("My agents", style = MaterialTheme.typography.labelSmall)
                     }
                     when {
-                        mentionLoading -> Text("Searching chats…", style = MaterialTheme.typography.bodySmall)
-                        mentionFailed -> Text("Could not search chats. You can keep typing.", style = MaterialTheme.typography.bodySmall)
-                        mentionRows.isEmpty() -> Text("No matching chats", style = MaterialTheme.typography.bodySmall)
+                        mentionLoading -> Text("Searching agents…", style = MaterialTheme.typography.bodySmall)
+                        mentionFailed -> Text("Could not search agents. You can keep typing.", style = MaterialTheme.typography.bodySmall)
+                        mentionRows.isEmpty() -> Text("No matching agents", style = MaterialTheme.typography.bodySmall)
                         else -> mentionRows.forEach { row ->
-                            Text(
-                                row.displayTitle,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.fillMaxWidth().clickable(role = Role.Button) {
+                            Row(
+                                Modifier.fillMaxWidth().clickable(role = Role.Button) {
                                     // Recheck the current draft; never insert a result from a replaced query.
-                                    if (SessionMention.query(fieldValue) == activeMention && draftingEnabled) {
+                                    if (SessionMention.query(fieldValue) == activeMention && effectiveDraftingEnabled) {
                                         val inserted = SessionMention.insert(text, SessionMention.link(mentions.teamId, row.sessionId))
-                                        field = TextFieldValue(inserted, TextRange(inserted.length))
                                         updateText(inserted)
                                     }
                                 }.padding(vertical = 8.dp),
-                            )
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                AgentAvatar(row.sessionId, row.agentRuntime, 20.dp)
+                                Text(row.displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                         }
                     }
                     }
@@ -440,22 +574,7 @@ fun ChatComposer(
             }
             if (rejectedSubmission != null) Text("A rejected message is retained. Clear this draft to restore it.", modifier = Modifier.padding(horizontal = 12.dp))
             if (picking) Text("Reading files…", modifier = Modifier.padding(horizontal = 12.dp))
-            pickerError?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp)) }
-            AnimatedVisibility(
-                visible = expanded,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically(),
-            ) {
-                ComposerDragHandle(
-                    modifier = Modifier.composerCollapseGesture(
-                        onDrag = { handleDrag = it },
-                        onCollapse = {
-                            handleDrag = 0f
-                            collapse()
-                        },
-                    ),
-                )
-            }
+            (pickerError ?: storageError)?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 12.dp)) }
 
             if (showControls) {
                 AnimatedVisibility(
@@ -470,6 +589,8 @@ fun ChatComposer(
                             .padding(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        if (onChooseAgent != null || agentLabel != null) AgentChip(agent, enabled = agentEnabled,
+                            onClick = onChooseAgent ?: { showAgentUsage = true }, labelOverride = agentLabel)
                         if (modelSettings != null) FilterChip(
                             selected = modelSettings.pending.isNotEmpty(),
                             onClick = { showModel = true },
@@ -478,7 +599,7 @@ fun ChatComposer(
                         FilterChip(
                             selected = !resolvedSelection.isEmpty,
                             onClick = { showIam = true },
-                            label = { Text(if (resolvedSelection.isEmpty) "IAM" else "IAM · ${resolvedSelection.count}") },
+                            label = { Text(if (resolvedSelection.isEmpty) "Credentials" else "Credentials · ${resolvedSelection.count}") },
                             leadingIcon = { Icon(Icons.Outlined.Key, contentDescription = null, modifier = Modifier.size(16.dp)) },
                         )
                         FilterChip(
@@ -503,17 +624,25 @@ fun ChatComposer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (voice.active) VoiceRecordingBar(voice) else BasicTextField(
-                    value = fieldValue,
-                    onValueChange = { value ->
-                        if (draftingEnabled) {
-                            field = value
-                            if (SessionMention.query(value.text) == null) dismissedAt = -1
-                            updateText(value.text)
+                    state = fieldState,
+                    inputTransformation = InputTransformation {
+                        if (!effectiveDraftingEnabled || savingSend) revertAllChanges()
+                        else {
+                            val value = asCharSequence().toString()
+                            if (SessionMention.query(value) == null) dismissedAt = -1
+                            try {
+                                draft?.key?.let { incomingShares.writeText(it, value) }
+                                if (draft != null) draft.write(value) else localText = value
+                            } catch (_: Exception) {
+                                revertAllChanges()
+                                pickerError = "Could not save this draft. Free storage and try again."
+                            }
                         }
                     },
-                    enabled = draftingEnabled,
+                    enabled = effectiveDraftingEnabled && !savingSend,
                     modifier = Modifier
                         .weight(1f)
+                        .contentReceiver(receiveContent)
                         .then(if (expanded) Modifier.heightIn(max = 192.dp) else Modifier)
                         .padding(vertical = if (expanded) 4.dp else 8.dp)
                         .onFocusChanged { state ->
@@ -526,19 +655,20 @@ fun ChatComposer(
                     textStyle = fieldStyle,
                     cursorBrush = SolidColor(colors.primary),
                     // Keep the scroll orientation stable when focus or payload changes.
-                    singleLine = false,
-                    maxLines = if (expanded) 8 else 1,
+                    lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = if (expanded) 8 else 1),
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Sentences,
                         imeAction = if (expanded) ImeAction.Default else ImeAction.Send,
                     ),
-                    keyboardActions = KeyboardActions(onSend = { send() }),
-                    decorationBox = { inner ->
+                    onKeyboardAction = KeyboardActionHandler { send() },
+                    decorator = { inner ->
                         Box(contentAlignment = Alignment.CenterStart) {
                             if (text.isEmpty()) {
                                 Text(
                                     if (isStreaming) "Queue a message…" else "Ask Nuphos anything…",
                                     style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = if (expanded) 8 else 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     color = colors.onSurfaceVariant,
                                 )
                             }
@@ -546,7 +676,11 @@ fun ChatComposer(
                         }
                     },
                 )
-
+                if (!expanded) {
+                    VoiceMic(enabled = canSubmit && effectiveDraftingEnabled && !picking && !voice.active, onClick = ::startVoice)
+                    TrailingButton(isStreaming = isStreaming, hasPayload = hasPayload && canSubmit && !picking && !voice.active,
+                        onStop = onStop, onSend = ::send)
+                }
             }
 
             AnimatedVisibility(
@@ -560,46 +694,58 @@ fun ChatComposer(
                 ) {
                     items(attachments, key = { it.id }) { attachment ->
                         AttachmentTile(attachment) {
-                            attachments.removeAll { it.id == attachment.id }
-                            attachment.releaseOwnedCopy()
+                            if (!savingSend) scope.launch {
+                                try {
+                                    draft?.key?.let { incomingShares.forgetAttachment(it, attachment.id) }
+                                    attachments.removeAll { it.id == attachment.id }
+                                    withContext(Dispatchers.IO) { attachment.releaseOwnedCopy() }
+                                } catch (failure: Exception) {
+                                    if (failure is CancellationException) throw failure
+                                    pickerError = "Could not remove this saved attachment. Check storage and try again."
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            Row(
+            if (expanded) Row(
                     Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box {
-                        IconButton(onClick = { menu = true }, enabled = canSubmit && !picking && !voice.active, modifier = Modifier.size(36.dp)) {
-                            Icon(Icons.Outlined.Add, contentDescription = "Attach")
+                    IconButton(onClick = { photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+                        enabled = canSubmit && !picking && !voice.active, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Outlined.Photo, "Photos")
+                    }
+                    IconButton(onClick = { files.launch("*/*") }, enabled = canSubmit && !picking && !voice.active,
+                        modifier = Modifier.size(40.dp)) { Icon(Icons.Outlined.AttachFile, "Files") }
+                    IconButton(onClick = {
+                        try {
+                            val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            val clip = clipboard.primaryClip
+                            val uris = mutableListOf<Uri>()
+                            val pasted = StringBuilder()
+                            if (clip != null) for (index in 0 until clip.itemCount) {
+                                val item = clip.getItemAt(index)
+                                val uri = item.uri
+                                if (uri != null) {
+                                    require(uri.scheme == "content") { "Choose this file from Files instead." }
+                                    uris += uri
+                                } else item.text?.let { pasted.append(it) }
+                            }
+                            if (pasted.isNotEmpty()) updateText(text + pasted)
+                            if (uris.isNotEmpty()) loadSelection(uris, false, clip)
+                        } catch (_: Exception) { pickerError = "Could not paste this item. Try choosing it from Files." }
+                    }, enabled = canSubmit && !picking && !voice.active, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Outlined.ContentPaste, "Paste")
+                    }
+                    Spacer(Modifier.weight(1f))
+                    VoiceMic(enabled = canSubmit && effectiveDraftingEnabled && !picking && !voice.active, onClick = ::startVoice)
+                    if (isStreaming && onStop != null && hasPayload) {
+                        IconButton(onClick = ::send, enabled = canSubmit && !picking && !voice.active, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Outlined.PlaylistAdd, "Queue message")
                         }
-                        DropdownMenu(menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("Photos") }, onClick = {
-                                menu = false
-                                photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            })
-                            DropdownMenuItem(text = { Text("Files") }, onClick = {
-                                menu = false
-                                files.launch("*/*")
-                            })
-                        }
                     }
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    if (onChooseAgent != null || agentLabel != null) {
-                        AgentChip(agent, enabled = agentEnabled,
-                            onClick = onChooseAgent ?: { showAgentUsage = true },
-                            labelOverride = agentLabel)
-                    }
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    if (isStreaming && hasText && canSubmit && !voice.active) {
-                        IconButton(onClick = ::send, modifier = Modifier.size(36.dp)) {
-                            Icon(Icons.Outlined.PlaylistAdd, contentDescription = "Queue message")
-                        }
-                    }
-                    VoiceMic(enabled = canSubmit && draftingEnabled && !picking && !voice.active, onClick = ::startVoice)
                     TrailingButton(
                         isStreaming = isStreaming,
                         hasPayload = hasPayload && canSubmit && !picking && !voice.active,
@@ -611,7 +757,7 @@ fun ChatComposer(
     }
     if (showAgentUsage) {
         AlertDialog(onDismissRequest = { showAgentUsage = false },
-            title = { Text(agentLabel ?: "Agent usage") },
+            title = { Text(agentLabel ?: "Runtime usage") },
             text = { ai.nuphos.android.ui.agent.RuntimeUsage(agentQuota) },
             confirmButton = { TextButton(onClick = { showAgentUsage = false }) { Text("Done") } })
     }
@@ -727,7 +873,7 @@ private fun TrailingButton(
                 disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
             ),
         ) {
-            Icon(Icons.Rounded.ArrowUpward, contentDescription = "Send", modifier = Modifier.size(18.dp))
+            Icon(Icons.Rounded.ArrowUpward, contentDescription = if (isStreaming) "Queue message" else "Send", modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -777,7 +923,11 @@ private val RemoveBadgeHitOverhang = (RemoveBadgeHitSize - RemoveBadgeSize) / 2 
 @Composable
 private fun AttachmentThumbnail(attachment: ComposerAttachment) {
     Box(Modifier.size(64.dp)) {
-        when (val kind = attachment.kind) {
+        val retainedImage = (attachment.kind as? ComposerAttachment.Kind.RetainedFile)?.takeIf { it.image }
+        if (retainedImage != null) {
+            coil3.compose.AsyncImage(model = retainedImage.source.file, contentDescription = attachment.name,
+                modifier = Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
+        } else when (val kind = attachment.kind) {
             is ComposerAttachment.Kind.Image -> {
                 val bmp = remember(kind) { BitmapFactory.decodeByteArray(kind.jpeg, 0, kind.jpeg.size)?.asImageBitmap() }
                 if (bmp != null) {
@@ -801,7 +951,8 @@ private fun AttachmentThumbnail(attachment: ComposerAttachment) {
     }
 }
 
-private fun selectionInput(context: android.content.Context, uri: Uri, images: Boolean): AttachmentRetention.Input {
+internal fun selectionInput(context: android.content.Context, uri: Uri, images: Boolean): AttachmentRetention.Input {
+    require(uri.scheme == "content") { "Only content-provider attachments are supported." }
     var name = "attachment"
     var size: Long? = null
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
@@ -813,7 +964,7 @@ private fun selectionInput(context: android.content.Context, uri: Uri, images: B
         }
     }
     val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-    return AttachmentRetention.Input(name, mime, size, images || mime.startsWith("image/")) {
+    return AttachmentRetention.Input(name, mime, size, (images && !mime.startsWith("video/")) || mime.startsWith("image/")) {
         requireNotNull(context.contentResolver.openInputStream(uri)) { "Could not open the selected file." }
     }
 }
@@ -837,7 +988,7 @@ private fun imageInput(input: AttachmentRetention.Input): InputStream = object :
     }
 }
 
-private fun loadImage(input: AttachmentRetention.Input, remaining: Long): ComposerAttachment {
+internal fun loadImage(input: AttachmentRetention.Input, remaining: Long): ComposerAttachment {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     imageInput(input).use { BitmapFactory.decodeStream(it, null, bounds) }
     require(bounds.outWidth > 0 && bounds.outHeight > 0) { "This image cannot be read." }

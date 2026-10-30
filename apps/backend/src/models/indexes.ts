@@ -5,6 +5,7 @@ import { backfillConversationWatchers, setupAgentIndexes } from '@/lib/agent/db'
 import { setupDeviceExecAuditIndexes } from '@/lib/agent/devices/audit'
 import { setupLocalRuntimeActivityIndexes } from '@/lib/agent/devices/local-runtime/activity'
 import { setupDeviceJoinTokenIndexes } from '@/lib/agent/devices/join-tokens'
+import { setupShareApprovalIndexes } from '@/lib/agent/devices/local-share-store'
 import { setupAgentDeviceIndexes } from '@/lib/agent/devices/store'
 import { setupDirectoryIndexes } from '@/lib/agent/directory'
 import { runMemoryProviderSetup } from '@/lib/agent/memory-slots'
@@ -27,6 +28,7 @@ import { setupDownloadLinkEmailIndexes } from '@/lib/download-link-email'
 import { setupEmailOtpIndexes } from '@/lib/email-otp'
 import { setupIdentityIndexes } from '@/lib/identity'
 import { setupCliTokenIndexes } from '@/lib/identity/cli-tokens'
+import { setupUserSessionIndexes } from '@/lib/identity/sessions'
 import { setupDeviceLoginIndexes } from '@/lib/identity/device-login'
 import { setupPasswordIndexes } from '@/lib/identity/password'
 import { setupSocialAuthIndexes } from '@/lib/identity/social-store'
@@ -40,7 +42,12 @@ import { setupSlackNotificationIncidentIndexes } from '@/lib/slack/incident-noti
 import { setupSlackIncidentOccurrenceIndexes } from '@/lib/slack/incident-occurrences'
 import { setupCoreIndexes } from '@/models/indexes-core'
 import { agentInstructions } from '@/models/instructions'
-import { teamHomeLayouts, teamInvitations, userTeamSidebarFavorites } from '@/models/team'
+import {
+  teamHomeLayouts,
+  teamInvitations,
+  userTeamRuntimeFallbacks,
+  userTeamSidebarFavorites,
+} from '@/models/team'
 
 // Mongo 85/86 = an index with this name already exists under a different spec
 // — typically another branch's backend upgraded it on the shared replica set.
@@ -74,6 +81,7 @@ export async function setupIndexes(): Promise<void> {
     ['native-auth', setupNativeAuthIndexes],
     ['social-auth', setupSocialAuthIndexes],
     ['cli-tokens', setupCliTokenIndexes],
+    ['user-sessions', setupUserSessionIndexes],
     ['device-login', setupDeviceLoginIndexes],
     ['runtime-login', setupRuntimeLoginIndexes],
     ['hosted-runtime-slots', setupHostedRuntimeSlotIndexes],
@@ -105,9 +113,11 @@ export async function setupIndexes(): Promise<void> {
     ['preview-memory-activity', setupPreviewMemoryActivityIndexes],
     ['sidebar-favorites', setupSidebarFavoritesIndexes],
     ['home-layouts', setupHomeLayoutIndexes],
+    ['runtime-fallbacks', setupRuntimeFallbackIndexes],
     ['push-devices', setupPushDeviceIndexes],
     ['push-live-activities', setupLiveActivityIndexes],
     ['agent-devices', setupAgentDeviceIndexes],
+    ['agent-device-shares', setupShareApprovalIndexes],
     ['agent-device-join-tokens', setupDeviceJoinTokenIndexes],
     ['agent-device-exec-audit', setupDeviceExecAuditIndexes],
     ['agent-device-runtime-sessions', setupLocalRuntimeActivityIndexes],
@@ -142,6 +152,13 @@ async function setupHomeLayoutIndexes(): Promise<void> {
   await teamHomeLayouts().createIndex(
     { teamId: 1, userId: 1 },
     { unique: true, name: 'team_home_layouts_scope_unique' },
+  )
+}
+
+async function setupRuntimeFallbackIndexes(): Promise<void> {
+  await userTeamRuntimeFallbacks().createIndex(
+    { teamId: 1, userId: 1 },
+    { unique: true, name: 'user_team_runtime_fallbacks_scope_unique' },
   )
 }
 

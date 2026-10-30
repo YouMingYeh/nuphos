@@ -10,7 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-data class RuntimeSetupState(val busy: Boolean = false, val catalogLoaded: Boolean = false,
+data class RuntimeSetupState(val busy: Boolean = false, val catalogLoaded: Boolean = false, val catalogRevision: Long = 0,
     val error: String? = null, val message: String? = null,
     val attempt: RuntimeLogin? = null, val loginReconciled: Boolean = false,
     val attemptMismatch: Boolean = false)
@@ -39,15 +39,17 @@ class RuntimeSetupStore(
     private fun loginTargetCurrent() = signInRuntime?.let {
         it.kind in setOf("managed", "external") && it.id == selection.loginRuntimeId && it.provider == selection.loginProvider
     } == true
+    private var opening = 0L
     fun detail(runtimeId: String): RuntimeDetailStore? = (api as? RuntimeManagementTransport)?.let {
-        RuntimeDetailStore(it, api, scope, { active && isSourceCurrent() }, { canAdminister }, selection, runtimeId, expired)
+        val ownerOpening = opening
+        RuntimeDetailStore(it, api, scope, { active && opening == ownerOpening && state.catalogLoaded && isSourceCurrent() }, { canAdminister }, selection, runtimeId, expired)
     }
     fun isSourceCurrent() = selection.valid && sourceCurrent()
     val canAdminister get() = isSourceCurrent() && administrator()
-    fun open() { active = true; refresh() }
+    fun open() { opening++; active = true; refresh() }
     fun close() {
         active = false; generation++; job?.cancel(); poll?.cancel(); job = null; poll = null
-        state = state.copy(busy = false, attempt = null, loginReconciled = false)
+        state = state.copy(busy = false, catalogLoaded = false, attempt = null, loginReconciled = false)
     }
     fun setForeground(resumed: Boolean) {
         foreground = resumed; poll?.cancel(); poll = null
@@ -76,7 +78,7 @@ class RuntimeSetupStore(
         launch { ticket ->
             val saved = api.catalog()
             if (!current(ticket)) return@launch
-            selection.saveCatalog(saved); state = state.copy(catalogLoaded = true)
+            selection.saveCatalog(saved); state = state.copy(catalogLoaded = true, catalogRevision = state.catalogRevision + 1)
             if (canAdminister && selection.loginReview && loginTargetCurrent()) readLogin(ticket)
         }
     }
@@ -100,7 +102,7 @@ class RuntimeSetupStore(
         if (selection.select(id)) {
             signInTargetId = null
             generation++; poll?.cancel(); state = state.copy(attempt = null, loginReconciled = false, attemptMismatch = false,
-                message = "Agent selected for new chats. Registration does not confirm provider readiness.")
+                message = "Runtime selected for new agents. Registration does not confirm provider readiness.")
             if (selection.loginReview && selection.loginRuntimeId == id && canAdminister) refreshLogin()
         }
     }
@@ -121,15 +123,15 @@ class RuntimeSetupStore(
             }
             if (!current(ticket) || !canAdminister) return@launch
             state = state.copy(catalogLoaded = false,
-                message = "Creation may have saved an Agent. Refresh and review the saved list before another creation.")
+                message = "Creation may have saved a runtime. Refresh and review the saved list before another creation.")
             val saved = api.catalog()
             if (!current(ticket) || !canAdminister) return@launch
             selection.saveCatalog(saved)
             val verified = returnedId?.let { id -> saved.firstOrNull { it.id == id && it.selectable } }
             if (verified != null) { selection.select(verified.id); selection.createReview = false }
             state = state.copy(catalogLoaded = true, message = if (verified == null)
-                "We could not identify the saved result. No creation was sent again. Review saved Agents."
-                else "Agent registered and selected. Provider readiness is not confirmed.")
+                "We could not identify the saved result. No creation was sent again. Review saved runtimes."
+                else "Runtime registered and selected. Provider readiness is not confirmed.")
         }
     }
     fun confirmCreateReviewed() {
@@ -175,7 +177,7 @@ class RuntimeSetupStore(
         if (!current(ticket) || !canAdminister) return
         val observed = if (result.pending && !result.valid(now())) result.copy(state = "failed", verificationUri = null, userCode = null, authorizationUrl = null) else result
         state = state.copy(attempt = observed, loginReconciled = true, attemptMismatch = false,
-            message = if (observed.state == "connected") "Provider sign-in connected. Refreshing saved Agent registration; readiness is not confirmed." else null)
+            message = if (observed.state == "connected") "Provider sign-in connected. Refreshing saved runtime registration; readiness is not confirmed." else null)
         if (observed.state == "connected") {
             state = state.copy(catalogLoaded = false)
             val saved = api.catalog()
@@ -213,7 +215,7 @@ class RuntimeSetupStore(
         launch(admin = true) { ticket ->
             api.cancel(id, attempt.attemptId)
             if (current(ticket) && canAdminister) state = state.copy(attempt = attempt.copy(state = "cancelled", verificationUri = null,
-                userCode = null, authorizationUrl = null), loginReconciled = true, message = "Sign-in cancelled. The registered Agent remains saved.")
+                userCode = null, authorizationUrl = null), loginReconciled = true, message = "Sign-in cancelled. The registered runtime remains saved.")
         }
     }
     fun confirmLoginRestart() {
@@ -243,7 +245,7 @@ class RuntimeSetupStore(
         else state = state.copy(error = when {
             e is RuntimeLoginAbsent -> "No actor-bound sign-in was found. The result is unconfirmed; no new attempt was started."
             e is RuntimeHttpFailure && e.status == 403 -> "Administrator permission is required. Your account stays signed in."
-            else -> "We could not confirm the Agent result. Refresh saved state before continuing."
+            else -> "We could not confirm the runtime result. Refresh saved state before continuing."
         })
     }
 }

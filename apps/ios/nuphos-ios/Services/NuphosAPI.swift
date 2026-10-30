@@ -1,24 +1,20 @@
 import Foundation
 
 /// Thin client for api.nuphos.ai, or the self-hosted backend chosen on the
-/// sign-in screen. Every call takes the bearer token; the session owns it.
-enum NuphosAPI {
-    static let defaultBaseURL = URL(string: "https://api.nuphos.ai")!
-    /// UserDefaults key for a self-hosted backend origin; unset means Nuphos Cloud.
-    static let baseURLKey = "apiBaseURL"
-
-    static var baseURL: URL {
-        UserDefaults.standard.string(forKey: baseURLKey).flatMap(URL.init(string:)) ?? defaultBaseURL
-    }
-
+/// sign-in screen (`NuphosAPIBase.swift`). Every call takes the bearer token;
+/// the session owns it.
+extension NuphosAPI {
     enum Failure: LocalizedError {
         case unauthorized
+        /// `403 session_required`: this sign-in predates sessions.
+        case sessionRequired
         case http(Int, message: String?)
         case invalidResponse
 
         var errorDescription: String? {
             switch self {
             case .unauthorized: "Your session has expired. Please sign in again."
+            case .sessionRequired: "Sign in again to manage your devices."
             case .http(let code, let message): message ?? "Nuphos returned an unexpected response (\(code))."
             case .invalidResponse: "Nuphos returned something we could not read."
             }
@@ -52,10 +48,6 @@ enum NuphosAPI {
         return envelope.members
     }
 
-    enum ConversationScope: String { case mine, team, shared }
-    enum ConversationArchiveFilter: String { case exclude, only }
-    enum ConversationSort: String { case activity, created }
-
     /// `GET /agent/conversations`. `teamId` is mandatory; `cursor` is the
     /// `lastActiveAt` of the previous page's last row. Trigger runs are
     /// excluded (no `triggerId`), matching the desktop's "Chats" listing.
@@ -64,20 +56,17 @@ enum NuphosAPI {
         teamId: String,
         cursor: String? = nil,
         limit: Int = 30,
-        scope: ConversationScope = .mine,
-        search: String? = nil,
-        archived: ConversationArchiveFilter? = .exclude,
-        sort: ConversationSort = .activity
+        search: String? = nil
     ) async throws -> AgentConversationsPage {
         var query = [
             URLQueryItem(name: "teamId", value: teamId),
             URLQueryItem(name: "limit", value: String(limit)),
-            URLQueryItem(name: "scope", value: scope.rawValue),
-            URLQueryItem(name: "sort", value: sort.rawValue),
+            URLQueryItem(name: "scope", value: "mine"),
+            URLQueryItem(name: "sort", value: "activity"),
+            URLQueryItem(name: "archived", value: "exclude"),
         ]
         if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
         if let search, !search.isEmpty { query.append(URLQueryItem(name: "search", value: search)) }
-        if let archived { query.append(URLQueryItem(name: "archived", value: archived.rawValue)) }
         let observedAt = ProcessInfo.processInfo.systemUptime
         let page: AgentConversationsPage = try await get("agent/conversations", query: query, token: token, timeout: 20)
         for row in page.rows {
@@ -90,15 +79,19 @@ enum NuphosAPI {
     /// `GET /agent/conversations/:sessionId?teamId=&tail=` — the last `tail`
     /// messages of a conversation.
     static func conversationDetail(
-        token: String, teamId: String, sessionId: String, tail: Int = 100
+        token: String, teamId: String, sessionId: String, tail: Int = 100, displayed: Bool = true
     ) async throws -> AgentConversationDetail {
         let detail: AgentConversationDetail = try await get(
             "agent/conversations/\(sessionId)",
-            query: [URLQueryItem(name: "teamId", value: teamId), URLQueryItem(name: "tail", value: String(tail))],
+            // `runtimeState=omit`: the server still probes the runtime when a run is
+            // live, and otherwise answers with the state it last recorded, like the
+            // list. Probing on every read made a slow computer hold each one for 3 s.
+            query: [URLQueryItem(name: "teamId", value: teamId), URLQueryItem(name: "tail", value: String(tail)),
+                    URLQueryItem(name: "runtimeState", value: "omit")],
             token: token,
             timeout: 20
         )
-        ConversationUnread.shared.receive(team: teamId, session: sessionId, activity: detail.activitySeq, read: detail.readSeq, displayed: true)
+        ConversationUnread.shared.receive(team: teamId, session: sessionId, activity: detail.activitySeq, read: detail.readSeq, displayed: displayed)
         return detail
     }
 
@@ -154,6 +147,16 @@ enum NuphosAPI {
         }
         return d
     }()
+
+    /// Whether the caller's conversation on a teammate's shared computer waits for its owner.
+    static func ownShareApproval(token: String, sessionId: String) async throws -> ShareApprovalStatus {
+        try await get(
+            "agent/devices/share-approvals/mine",
+            query: [URLQueryItem(name: "sessionId", value: sessionId)],
+            token: token,
+            timeout: 15
+        )
+    }
 
     private static func get<T: Decodable>(
         _ path: String, query: [URLQueryItem] = [], token: String, timeout: TimeInterval

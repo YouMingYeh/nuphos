@@ -89,6 +89,17 @@ struct AgentPage: View {
                 // actions must not reopen chats (or resend a preview prompt).
                 guard !didHandleLaunchAction, !Task.isCancelled else { return }
                 didHandleLaunchAction = true
+                // `-open-links <url>…`: open each link as if tapped, two seconds
+                // apart. Not tied to this page, which leaves when a chat opens.
+                if let i = CommandLine.arguments.firstIndex(of: "-open-links") {
+                    let links = CommandLine.arguments[(i + 1)...].prefix { !$0.hasPrefix("-") }.compactMap(URL.init(string:))
+                    Task {
+                        for link in links {
+                            try? await Task.sleep(for: .seconds(2))
+                            PushNotifications.shared.open(link)
+                        }
+                    }
+                }
                 if CommandLine.arguments.contains("-open-first-chat") {
                     openChat = store.conversations.first.map { OpenChat(session: store.session(for: $0)) }
                 }
@@ -109,7 +120,7 @@ struct AgentPage: View {
                     var tool = ChatPart.ToolPart(toolCallId: "toolu_preview", toolName: "rm -rf /tmp/build-cache", isDynamic: false, state: .approvalRequested)
                     tool.input = .object(["command": .string("rm -rf /tmp/build-cache"), "description": .string("Clear the build cache")])
                     tool.approval = .init(id: "openab:preview", source: "openab")
-                    tool.authorization = .object(["decision": .string("require_auth"), "reason": .string("OpenAB requested permission before running this tool.")])
+                    tool.authorization = .object(["decision": .string("require_auth")])
                     tool.startedAt = now
                     var reasoning = ChatPart.ReasoningPart(text: "The user wants the cache cleared. That is a destructive delete, so I should ask before running it.", state: .done)
                     reasoning.startedAt = Date.now.addingTimeInterval(-7); reasoning.endedAt = Date.now
@@ -145,7 +156,11 @@ struct AgentPage: View {
     private func openPushTarget() {
         guard let target = PushNotifications.shared.pendingTarget, store.teamsPhase == .loaded else { return }
         PushNotifications.shared.pendingTarget = nil
+        // The chat on screen already has this session loaded. A new session
+        // with the same id keeps the view's identity, so it would never load.
+        guard target.sessionId != openChat?.id else { return }
         if let team = store.teams.first(where: { $0.id == target.teamId }) { store.select(team: team) }
+        endEditing()
         openChat = OpenChat(session: store.session(sessionId: target.sessionId, title: target.title, teamId: target.teamId))
     }
 
@@ -181,21 +196,21 @@ struct AgentPage: View {
             }
         case .loaded where store.runtimesLoaded && store.runtimes.isEmpty:
             ContentUnavailableView {
-                Label("Connect your first agent", systemImage: "cpu")
+                Label("Connect your first runtime", systemImage: "cpu")
             } description: {
-                Text(store.selectedTeam?.isAdministrator == true ? "Create a cloud agent and sign in with your AI provider." : "Ask a workspace administrator to connect a cloud agent, or open Nuphos on your computer to connect your own local agent.")
+                Text(store.selectedTeam?.isAdministrator == true ? "Create a cloud runtime and sign in with your AI provider." : "Ask a workspace administrator to connect a cloud runtime, or open Nuphos on your computer to connect your own local runtime.")
             } actions: {
                 if store.selectedTeam?.isAdministrator == true {
-                    Button("Set up agent") { showAgentSetup = true }.prominentButton()
+                    Button("Set up runtime") { showAgentSetup = true }.prominentButton()
                 }
             }
         case .idle, .loading:
-            ProgressView("Loading chats…")
+            ProgressView("Loading agents…")
                 .tint(Theme.muted)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .failed(let message):
             ContentUnavailableView {
-                Label("Couldn't load chats", systemImage: "wifi.exclamationmark")
+                Label("Couldn't load agents", systemImage: "wifi.exclamationmark")
             } description: {
                 Text(message)
             } actions: {
@@ -204,11 +219,9 @@ struct AgentPage: View {
             }
         case .loaded where store.listedConversations.isEmpty:
             ContentUnavailableView {
-                Label(store.search.isEmpty ? (store.showArchived ? "No archived chats" : "No chats yet") : "No matches", systemImage: store.showArchived ? "archivebox" : "message")
+                Label(store.search.isEmpty ? "No agents yet" : "No matches", systemImage: "message")
             } description: {
-                Text(store.search.isEmpty
-                     ? (store.showArchived ? "Idle chats are archived automatically after a week." : "Start a conversation from the bar below.")
-                     : "No conversations match your search.")
+                Text(store.search.isEmpty ? "Start an agent from the bar below." : "No agents match your search.")
             }
         case .loaded:
             EmptyView()
@@ -218,11 +231,11 @@ struct AgentPage: View {
     @ViewBuilder
     private func rowActions(_ conversation: AgentConversation) -> some View {
         if conversation.canManage { Button {
-            Task { await store.setArchived(!conversation.isArchived, conversation: conversation) }
+            Task { await store.archive(sessionId: conversation.sessionId, teamId: conversation.teamId) }
         } label: {
-            Label(conversation.isArchived ? "Restore" : "Archive", systemImage: conversation.isArchived ? "tray.and.arrow.up" : "archivebox")
+            Label("Archive", systemImage: "archivebox")
         }
-        .tint(conversation.isArchived ? .blue : .orange) }
+        .tint(.orange) }
         Button {
             Task { try? await store.setPinned(!store.isPinned(conversation.sessionId), sessionId: conversation.sessionId, title: conversation.displayTitle) }
         } label: {
@@ -253,6 +266,7 @@ struct AgentPage: View {
             openChat?.id
         } set: { id in
             guard id != openChat?.id else { return }
+            endEditing()
             openChat = store.listedConversations.first { $0.sessionId == id }.map { OpenChat(session: store.session(for: $0)) }
         }
     }
@@ -286,7 +300,7 @@ struct AgentPage: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.borderless)
-                                .accessibilityLabel(folded ? "Show \(item.threads) threads" : "Hide \(item.threads) threads")
+                                .accessibilityLabel(folded ? "Show \(item.threads) sub-agents" : "Hide \(item.threads) sub-agents")
                             }
                         }
                         // Insets live here, not on the row, so the tree lines span the whole row.
@@ -326,12 +340,6 @@ struct AgentPage: View {
         .scrollContentBackground(.hidden)
         .background(Theme.canvas)
         .scrollDismissesKeyboard(.interactively)
-        .task {
-            while !Task.isCancelled {
-                RuntimeObservations.shared.tick()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
     }
 }
 
@@ -339,7 +347,7 @@ struct AgentPage: View {
 /// decides whether the query is server-backed (chats) or local (plans).
 struct SearchBar: View {
     @Binding var text: String
-    var placeholder: LocalizedStringKey = "Search chats"
+    var placeholder: LocalizedStringKey = "Search agents"
     var onCancel: () -> Void
     @FocusState private var focused: Bool
 
@@ -410,8 +418,10 @@ struct NewChatComposer: View {
                 await store.loadCredentialOptions()
                 return await store.mentionableSessions(teamId: draftTeam, excluding: nil, matching: query)
             }
-        ), onSend: { submission in
-            if let session = store.newSession() { openChat = AgentPage.OpenChat(session: session, prompt: submission) }
+        ), voiceTeamId: draftTeam.isEmpty ? nil : draftTeam, onSend: { submission in
+            guard let session = store.newSession() else { return }
+            endEditing()
+            openChat = AgentPage.OpenChat(session: session, prompt: submission)
         }) {
             ComposerControls(selection: $store.credentialSelection, mode: $store.permissionMode, session: nil)
         }
@@ -425,4 +435,13 @@ struct NewChatComposer: View {
             ComposerDrafts.set(text, team: draftTeam, session: "new")
         }
     }
+}
+
+/// Puts the list's keyboard away before a chat opens. UIKit remembers the
+/// focus a pushed chat covered and hands it back when a back swipe starts,
+/// raising a keyboard that lifts the chat's composer mid-swipe.
+private func endEditing() {
+    #if canImport(UIKit)
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    #endif
 }

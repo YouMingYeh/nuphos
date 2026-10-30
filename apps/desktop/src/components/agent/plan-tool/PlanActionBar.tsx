@@ -1,10 +1,13 @@
 import clsx from 'clsx'
 import { Check, ChevronDown, ChevronLeft, Loader2, MessageSquare, RotateCcw, X } from 'lucide-react'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
+import { t } from '../../../i18n'
+import { comboText } from '../../../lib/platform'
 import { Button } from '../../ui/button'
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '../../ui/menu'
+import { useDecisionKeys } from '../panel/useDecisionKeys'
 
 import type { PlanDecisionState } from './usePlanDecision'
 import type { PlanApprovalProgress } from '../../../api'
@@ -45,6 +48,14 @@ export function PlanActionBar({
     reject,
   } = state
   const hasChangeRequest = changeRequest.trim().length > 0
+  const live = decision === 'pending' && showApproveBar && !changesOpen
+  const cardRef = useRef<HTMLDivElement | null>(null)
+  const act = useDecisionKeys(cardRef, live, (key) => {
+    if (key.kind !== 'approve') return false
+    void approve()
+
+    return true
+  })
   // Cross-fade the footer when the decision changes, but not on mount, so a
   // card scrolled into history doesn't replay it.
   const [shown, setShown] = useState({ decision, swapped: false })
@@ -53,6 +64,8 @@ export function PlanActionBar({
 
   return (
     <div
+      ref={cardRef}
+      data-decision-card={live ? '' : undefined}
       className={clsx(
         'flex flex-shrink-0 flex-col gap-2.5 px-4',
         floating
@@ -79,7 +92,7 @@ export function PlanActionBar({
                       ref={changeRequestRef}
                       value={changeRequest}
                       onChange={(e) => setChangeRequest(e.target.value)}
-                      placeholder="Tell the agent what to change…"
+                      placeholder={t('Tell the agent what to change…')}
                       rows={2}
                       onCompositionStart={() => {
                         imeComposingRef.current = true
@@ -124,8 +137,15 @@ export function PlanActionBar({
             <div className="flex items-center justify-end gap-2">
               {approvalProgress && (
                 <span className="mr-auto text-[11.5px] text-tertiary">
-                  Requester {approvalProgress.requesterApproved ? 'approved' : 'pending'} · team{' '}
-                  {approvalProgress.otherApprovals}/{approvalProgress.minimumOtherApprovals}
+                  {approvalProgress.requesterApproved
+                    ? t('Requester approved · team {done}/{required}', {
+                        done: approvalProgress.otherApprovals,
+                        required: approvalProgress.minimumOtherApprovals,
+                      })
+                    : t('Requester pending · team {done}/{required}', {
+                        done: approvalProgress.otherApprovals,
+                        required: approvalProgress.minimumOtherApprovals,
+                      })}
                 </span>
               )}
               {changesOpen ? (
@@ -140,7 +160,7 @@ export function PlanActionBar({
                     className="flex-shrink-0 gap-1.5"
                   >
                     <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2.2} />
-                    Back
+                    {t('Back')}
                   </Button>
                   <Button
                     variant="primary"
@@ -150,7 +170,7 @@ export function PlanActionBar({
                     className="flex-shrink-0 gap-1.5 px-4 active:scale-95"
                   >
                     <MessageSquare className="h-3 w-3" strokeWidth={2.4} />
-                    Send
+                    {t('Send')}
                   </Button>
                 </>
               ) : (
@@ -158,20 +178,21 @@ export function PlanActionBar({
                   <Button
                     variant="primary"
                     size="sm"
-                    onClick={() => void approve()}
+                    title={t('Approve ({shortcut})', { shortcut: comboText('mod+enter') })}
+                    onClick={() => act(() => void approve())}
                     className={clsx(
                       'flex-shrink-0 gap-1.5 pl-3 pr-2.5 active:scale-95',
                       onReject && 'rounded-r-none',
                     )}
                   >
                     <Check className="h-3 w-3" strokeWidth={2.4} />
-                    Approve
+                    {t('Approve')}
                   </Button>
                   {onReject && (
                     <Menu>
                       <MenuTrigger
                         className="flex h-8 w-8 flex-shrink-0 items-center justify-center border-l border-white/20 bg-zViolet-500 text-white transition hover:bg-zViolet-400 data-[popup-open]:bg-zViolet-400"
-                        aria-label="More plan actions"
+                        aria-label={t('More plan actions')}
                       >
                         <ChevronDown className="h-3.5 w-3.5" strokeWidth={2.4} />
                       </MenuTrigger>
@@ -180,14 +201,14 @@ export function PlanActionBar({
                           icon={<MessageSquare className="h-3.5 w-3.5" strokeWidth={2} />}
                           onClick={() => setChangesOpen(true)}
                         >
-                          Request changes
+                          {t('Request changes')}
                         </MenuItem>
                         <MenuItem
                           destructive
                           icon={<X className="h-3.5 w-3.5" strokeWidth={2.2} />}
                           onClick={reject}
                         >
-                          Reject
+                          {t('Reject')}
                         </MenuItem>
                       </MenuContent>
                     </Menu>
@@ -199,7 +220,7 @@ export function PlanActionBar({
         ) : decision === 'approving' ? (
           <span className="inline-flex items-center gap-1.5 text-[12.5px] text-tertiary">
             <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.2} />
-            Recording approval…
+            {t('Recording approval…')}
           </span>
         ) : decision === 'pending' ? (
           <div className="flex items-center justify-end gap-2">
@@ -221,46 +242,46 @@ export function PlanActionBar({
                 ) : (
                   <RotateCcw className="h-3 w-3" strokeWidth={2.2} />
                 )}
-                Retry
+                {t('Retry')}
               </Button>
             )}
           </div>
         ) : decision === 'approved' ? (
           <span className="inline-flex items-center gap-1.5 text-[12.5px] text-emerald-400">
             <Check className="h-3.5 w-3.5" strokeWidth={2.4} />
-            Plan approved — ready to proceed.
+            {t('Plan approved — ready to proceed.')}
           </span>
         ) : decision === 'approval-recorded' ? (
           <span className="inline-flex items-center gap-1.5 text-[12.5px] text-zViolet-accent">
             <Check className="h-3.5 w-3.5" strokeWidth={2.4} />
-            Approval recorded — waiting for{' '}
-            {Math.max(
-              0,
-              Number(
-                Boolean(
-                  approvalProgress?.requesterApprovalRequired &&
-                  !approvalProgress.requesterApproved,
-                ),
-              ) +
-                (approvalProgress?.minimumOtherApprovals ?? 0) -
-                (approvalProgress?.otherApprovals ?? 0),
-            )}{' '}
-            more required approval(s).
+            {t('Approval recorded — waiting for {n} more required approval(s).', {
+              n: Math.max(
+                0,
+                Number(
+                  Boolean(
+                    approvalProgress?.requesterApprovalRequired &&
+                    !approvalProgress.requesterApproved,
+                  ),
+                ) +
+                  (approvalProgress?.minimumOtherApprovals ?? 0) -
+                  (approvalProgress?.otherApprovals ?? 0),
+              ),
+            })}
           </span>
         ) : decision === 'changes-requested' ? (
           <span className="inline-flex items-center gap-1.5 text-[12.5px] text-tertiary">
             <MessageSquare className="h-3.5 w-3.5" strokeWidth={2} />
-            Changes requested — agent revising.
+            {t('Changes requested — agent revising.')}
           </span>
         ) : decision === 'rejected' ? (
           <span className="inline-flex items-center gap-1.5 text-[12.5px] text-tertiary">
             <X className="h-3.5 w-3.5" strokeWidth={2.2} />
-            Plan rejected.
+            {t('Plan rejected.')}
           </span>
         ) : (
           <span className="inline-flex items-center gap-1.5 text-[12.5px] text-tertiary">
             <MessageSquare className="h-3.5 w-3.5" strokeWidth={2} />
-            Plan paused — type a message to redirect.
+            {t('Plan paused — type a message to redirect.')}
           </span>
         )}
       </div>

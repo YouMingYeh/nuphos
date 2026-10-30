@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { api } from '../../../api'
+import { t } from '../../../i18n/index.ts'
 import { composerTextState } from '../../../lib/composerTextState'
 import { cssDurationMs } from '../../../lib/motion'
 
 import { isImageAttachmentPath } from './attachments'
-import { readEditorText, renumberImageRefs } from './composerSerialize'
+import { focusAtEnd, readEditorText, renumberImageRefs } from './composerSerialize'
 import { AGENT_COMPACT_PLACEHOLDER, AGENT_PLACEHOLDER_PROMPTS } from './constants'
 
 import type { LocalAgentSessionInfo, LocalSessionSource } from '../../../api'
@@ -18,6 +19,7 @@ export function useComposerState({
   readOnlyPlaceholder,
   streaming,
   autoFocus,
+  focusKey,
   promptSuggestion,
 }: {
   hero: boolean
@@ -25,6 +27,8 @@ export function useComposerState({
   readOnlyPlaceholder?: string
   streaming: boolean
   autoFocus: boolean
+  /** The conversation shown; switching to another one takes the caret even mid-reply or with a draft. */
+  focusKey?: string
   promptSuggestion?: string | null
 }) {
   // One suggestion per composer mount, picked at random. Rotating it moved the
@@ -108,7 +112,13 @@ export function useComposerState({
   }
 
   function syncEmpty() {
-    const state = composerTextState(readText())
+    const text = readText()
+
+    // Chromium leaves a <br> behind once everything is deleted. The text is
+    // empty, so make the DOM empty too; otherwise the next insertion (a Tab
+    // suggestion, a slash command) lands after that <br>, on a second line.
+    if (!text && !composingRef.current) ref.current?.replaceChildren()
+    const state = composerTextState(text)
 
     setHasEditorContent(state.hasContent)
     setIsEmpty(!state.canSendText)
@@ -213,10 +223,21 @@ export function useComposerState({
   }, [autoFocus, isEmpty, readOnly, streaming])
 
   useEffect(() => {
+    if (!autoFocus || readOnly) return
+    // After the draft restore, so typing continues the draft rather than prefixing it.
+    const frame = window.requestAnimationFrame(() => {
+      if (ref.current) focusAtEnd(ref.current)
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusKey])
+
+  useEffect(() => {
     const next = readOnly
-      ? (readOnlyPlaceholder ?? 'This conversation is read-only')
+      ? (readOnlyPlaceholder ?? t('This agent is read-only'))
       : streaming
-        ? 'Agent is replying...'
+        ? t('Agent is replying...')
         : idlePlaceholder
 
     swapPlaceholder(next)
