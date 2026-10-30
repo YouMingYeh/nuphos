@@ -1,13 +1,15 @@
 import { faSpinner } from '@fortawesome/free-solid-svg-icons'
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome'
-import { useState } from 'react'
+import { useId, useState } from 'react'
 
 import { Button } from '../../components/ui/button'
 import { toast } from '../../components/ui/toast'
+import { t } from '../../i18n'
 import { AGENT_PROVIDER } from '../../types/runtime'
 
 import { MIN_RUNTIME_PASSWORD as MIN_PASSWORD, runtimePasswordProblem } from './runtimePassword'
 import { Field } from './shared'
+import { StepActions } from './StepActions'
 import { inputClasses } from './styles'
 import {
   looksLikeAcpUrl,
@@ -16,13 +18,17 @@ import {
 
 import type { RegisterExternalRuntimeInput, RuntimeInstance } from '../../types/runtime'
 
-const PASSWORD_HINT = `The OPENAB_ACP_AUTH_KEY you started the container with — at least ${String(MIN_PASSWORD)} characters. \`openssl rand -hex 32\` makes one.`
+const PASSWORD_HINT = t(
+  'The OPENAB_ACP_AUTH_KEY you started the container with — at least {min} characters. `openssl rand -hex 32` makes one.',
+  { min: MIN_PASSWORD },
+)
 
 export function ExternalRuntimePasswordForm({
   onDetectProvider,
   onRegister,
   onCancel,
   onUsePairingCode,
+  footer,
 }: {
   /** Probes the runtime with the address and password entered so far. Returns
    *  null when the runtime is unreachable or did not identify itself. */
@@ -30,7 +36,10 @@ export function ExternalRuntimePasswordForm({
   onRegister: (input: RegisterExternalRuntimeInput) => Promise<void>
   onCancel: () => void
   onUsePairingCode: () => void
+  /** A dialog's pinned footer for the actions; inline below the fields without one. */
+  footer?: HTMLElement | null
 }) {
+  const formId = useId()
   const [url, setUrl] = useState('')
   const [password, setPassword] = useState('')
   const [saving, setSaving] = useState(false)
@@ -58,29 +67,55 @@ export function ExternalRuntimePasswordForm({
         ...(detectedProvider ? { provider: detectedProvider } : {}),
       })
     } catch (error) {
-      toast.apiError('Could not connect agent', error)
+      toast.apiError(t('Could not connect runtime'), error)
     } finally {
       setSaving(false)
     }
   }
 
+  const primary = (
+    <Button size="sm" type="submit" form={formId} disabled={cannotSave}>
+      {saving ? t('Connecting…') : t('Connect runtime')}
+    </Button>
+  )
+  const cancel = (
+    <button
+      type="button"
+      onClick={onCancel}
+      disabled={saving}
+      className="rounded-md px-3 py-1.5 text-[12.5px] text-secondary hover:bg-zGray-800/60"
+    >
+      {t('Cancel')}
+    </button>
+  )
+  const switchLink = (side: string) => (
+    <button
+      type="button"
+      onClick={onUsePairingCode}
+      disabled={saving}
+      className={`${side} rounded-md px-3 py-1.5 text-[12.5px] text-secondary hover:bg-zGray-800/60`}
+    >
+      {t('Use a pairing code instead')}
+    </button>
+  )
+
   return (
-    <form onSubmit={(event) => void submit(event)} className="space-y-4">
+    <form id={formId} onSubmit={(event) => void submit(event)} className="space-y-4">
       <p className="rounded-lg bg-zGray-800/40 p-3 text-[13px] leading-5 text-secondary">
-        Start the agent container with one variable, its admin password, and serve it over wss:// —
-        most hosts provide TLS for you. Then paste its address and that same password here. Nuphos
-        detects which agent it runs on its own.
+        {t(
+          'Start the runtime container with one variable, its admin password, and serve it over wss:// — most hosts provide TLS for you. Then paste its address and that same password here. Nuphos detects which runtime it runs on its own.',
+        )}
       </p>
       <Field
-        label="Address"
+        label={t('Address')}
         hint={
           urlLooksWrong
-            ? 'Enter the agent’s ACP address, for example wss://runtime.example.com/acp.'
-            : 'The ACP endpoint your agent serves, usually the host plus /acp.'
+            ? t('Enter the runtime’s ACP address, for example wss://runtime.example.com/acp.')
+            : t('The ACP endpoint your runtime serves, usually the host plus /acp.')
         }
       >
         <input
-          aria-label="Address"
+          aria-label={t('Address')}
           className={inputClasses}
           value={url}
           maxLength={500}
@@ -92,10 +127,10 @@ export function ExternalRuntimePasswordForm({
           disabled={saving}
         />
       </Field>
-      <Field label="Admin password" hint={passwordIssue ?? PASSWORD_HINT}>
+      <Field label={t('Admin password')} hint={passwordIssue ?? PASSWORD_HINT}>
         <input
           type="password"
-          aria-label="Admin password"
+          aria-label={t('Admin password')}
           className={inputClasses}
           value={password}
           maxLength={500}
@@ -109,37 +144,35 @@ export function ExternalRuntimePasswordForm({
       {detecting && (
         <p className="flex items-center gap-1.5 text-[12px] text-tertiary">
           <FontAwesomeIcon icon={faSpinner} spin className="h-3 w-3" />
-          Detecting the agent…
+          {t('Detecting the runtime…')}
         </p>
       )}
       {detectedProvider && (
         <p className="rounded-lg bg-zGray-800/40 p-3 text-[13px] leading-5 text-secondary">
-          {AGENT_PROVIDER[detectedProvider].label} detected. Once it is connected, sign it in to{' '}
-          {AGENT_PROVIDER[detectedProvider].account} with Sign in on its card.
-          {detectedProvider === 'codex' && ' That needs agent image 0.0.7 or newer.'}
+          {t(
+            '{provider} detected. Once it is connected, sign it in to {account} with Sign in on its card.',
+            {
+              provider: AGENT_PROVIDER[detectedProvider].label,
+              account: AGENT_PROVIDER[detectedProvider].account,
+            },
+          )}
+          {detectedProvider === 'codex' && ` ${t('That needs runtime image 0.0.7 or newer.')}`}
         </p>
       )}
-      <div className="flex items-center gap-2">
-        <Button size="sm" type="submit" disabled={cannotSave}>
-          {saving ? 'Connecting…' : 'Connect agent'}
-        </Button>
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={saving}
-          className="rounded-md px-3 py-1.5 text-[12.5px] text-secondary hover:bg-zGray-800/60"
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          onClick={onUsePairingCode}
-          disabled={saving}
-          className="ml-auto rounded-md px-3 py-1.5 text-[12.5px] text-secondary hover:bg-zGray-800/60"
-        >
-          Use a pairing code instead
-        </button>
-      </div>
+      {/* Inline as it always was; in a dialog's footer the primary action sits on the right. */}
+      {footer === undefined ? (
+        <div className="flex items-center gap-2">
+          {primary}
+          {cancel}
+          {switchLink('ml-auto')}
+        </div>
+      ) : (
+        <StepActions footer={footer} className="flex items-center justify-end gap-2">
+          {switchLink('mr-auto')}
+          {cancel}
+          {primary}
+        </StepActions>
+      )}
     </form>
   )
 }

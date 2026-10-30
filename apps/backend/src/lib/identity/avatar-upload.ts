@@ -3,12 +3,12 @@ import { createHash } from 'node:crypto'
 import { Binary, ObjectId } from 'mongodb'
 
 import { config } from '@/config'
-import { upsertCachedUser } from '@/lib/agent/directory'
+import { upsertCachedTeam, upsertCachedUser } from '@/lib/agent/directory'
 import { db } from '@/lib/db'
 import { AppError } from '@/lib/errors'
 
 import { hostedAvatarOwner, hostedAvatarPath } from './avatar-url'
-import { users, mapUser } from './shared'
+import { mapTeam, mapUser, teams, users } from './shared'
 
 export const MAX_AVATAR_UPLOAD_BYTES = 2 * 1024 * 1024
 export const AVATAR_SIZE = 256
@@ -47,26 +47,35 @@ export async function renderAvatar(input: Uint8Array): Promise<Uint8Array> {
   }
 }
 
-export async function uploadAvatar(userId: string, input: Uint8Array) {
+/**
+ * Stores the photo for `ownerId` (a user, an agent token or a team) and returns the
+ * URL that will serve it once the owner's document points at it.
+ */
+export async function storeAvatar(ownerId: string, input: Uint8Array): Promise<string> {
   if (input.byteLength === 0) throw new AppError(400, 'invalid_avatar_image', 'The image is empty')
   if (input.byteLength > MAX_AVATAR_UPLOAD_BYTES)
     throw new AppError(413, 'avatar_too_large', 'Use an image under 2 MB')
-  // A deletion request already removed the photo; a new one would outlive it.
-  if (await deletionPending(userId))
-    throw new AppError(409, 'account_deletion_pending', 'This account is being deleted')
   const bytes = await renderAvatar(input)
   const hash = createHash('sha256').update(bytes).digest('hex')
-  const _id = new ObjectId(userId)
 
   // Each image is its own document, stored before the URL that names it is
   // published, so a concurrent upload or removal can't delete it from under
-  // that URL. The users document holds the one current pointer.
+  // that URL. The owner's document holds the one current pointer.
   await userAvatars().updateOne(
-    { userId: _id, hash },
+    { userId: new ObjectId(ownerId), hash },
     { $set: { bytes: new Binary(bytes), updatedAt: new Date() } },
     { upsert: true },
   )
-  const avatarURL = `${config.auth.publicBaseUrl}${hostedAvatarPath(userId, hash)}`
+
+  return `${config.auth.publicBaseUrl}${hostedAvatarPath(ownerId, hash)}`
+}
+
+export async function uploadAvatar(userId: string, input: Uint8Array) {
+  // A deletion request already removed the photo; a new one would outlive it.
+  if (await deletionPending(userId))
+    throw new AppError(409, 'account_deletion_pending', 'This account is being deleted')
+  const _id = new ObjectId(userId)
+  const avatarURL = await storeAvatar(userId, input)
   const user = await setAvatarURL(_id, avatarURL)
 
   // A deletion request is recorded before its one-time purge, and this photo
@@ -102,6 +111,27 @@ export async function removeAvatar(userId: string) {
   return user
 }
 
+/**
+ * Sets a team's icon to an uploaded image, or removes it with `null`. The
+ * route checks the caller may edit the team.
+ */
+export async function setTeamAvatar(teamId: string, input: Uint8Array | null) {
+  const avatarUrl = input ? await storeAvatar(teamId, input) : ''
+  const team = await teams().findOneAndUpdate(
+    { _id: new ObjectId(teamId), deletedAt: { $exists: false } },
+    { $set: { avatarUrl, updatedAt: new Date() } },
+    { returnDocument: 'after' },
+  )
+
+  if (!team) throw new AppError(404, 'team_not_found', 'Team not found')
+  await pruneAvatars(teamId)
+  const result = mapTeam(team)
+
+  upsertCachedTeam(result)
+
+  return result
+}
+
 async function setAvatarURL(_id: ObjectId, avatarURL: string) {
   const user = await users().findOneAndUpdate(
     { _id, deletedAt: { $exists: false } },
@@ -125,13 +155,31 @@ async function deletionPending(userId: string): Promise<boolean> {
   return request !== null
 }
 
-/** The image hash in the user's current avatar URL, if it is one this backend serves. */
-async function currentAvatarHash(_id: ObjectId): Promise<string | null> {
+/** The owner's current avatar URL: a user's photo, an agent token's, or a team's icon. */
+async function currentAvatarURL(_id: ObjectId): Promise<unknown> {
   const user = await users().findOne(
     { _id, deletedAt: { $exists: false } },
     { projection: { avatarURL: 1 } },
   )
-  const url = typeof user?.avatarURL === 'string' ? user.avatarURL : ''
+
+  if (user) return user.avatarURL
+  const agent = await db()
+    .collection<{ _id: ObjectId; avatarUrl?: string }>('cli_tokens')
+    .findOne({ _id, kind: 'agent' }, { projection: { avatarUrl: 1 } })
+
+  if (agent) return agent.avatarUrl
+  const team = await teams().findOne(
+    { _id, deletedAt: { $exists: false } },
+    { projection: { avatarUrl: 1 } },
+  )
+
+  return team?.avatarUrl
+}
+
+/** The image hash in the owner's current avatar URL, if it is one this backend serves. */
+async function currentAvatarHash(_id: ObjectId): Promise<string | null> {
+  const owned = await currentAvatarURL(_id)
+  const url = typeof owned === 'string' ? owned : ''
 
   return url && hostedAvatarOwner(url) === _id.toHexString()
     ? (url.split('/').pop() ?? '').slice(0, 64)
@@ -139,7 +187,7 @@ async function currentAvatarHash(_id: ObjectId): Promise<string | null> {
 }
 
 /**
- * Deletes this user's stored photos except the current one. A photo stored
+ * Deletes the owner's stored photos except the current one. A photo stored
  * within the grace window stays: a request racing this one may be about to
  * publish it. It is not served meanwhile (see readAvatar), and the next prune
  * removes it.

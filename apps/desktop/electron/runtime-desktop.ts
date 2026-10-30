@@ -1,11 +1,11 @@
-import { apiUrl } from './api-endpoint.ts'
-import { readToken } from './atlas/client.ts'
+import { signedIn, stillCurrent } from './account-request.ts'
 import { authSession } from './auth-session.ts'
+import { onPageGone } from './page-owner.ts'
 
 import type { DesktopTarget, RuntimeDesktopEvent } from '../src/api/local-terminal-types.ts'
 import type { WebContents } from 'electron'
 
-type Session = { owner: WebContents; socket: WebSocket }
+type Session = { owner: WebContents; socket: WebSocket; release: () => void }
 
 /** RFB client messages are small; a control frame smaller. */
 const MAX_INPUT_CHARS = 64 * 1024
@@ -27,21 +27,26 @@ export class RuntimeDesktopSessions {
   async start(owner: WebContents, id: string, target: DesktopTarget): Promise<void> {
     if (this.get(owner, id)) return
     if (this.sessions.size >= 8) throw new Error('Close a desktop before opening another one.')
-    const token = await readToken()
+    const account = await signedIn().catch(() => null)
 
-    if (!token) throw new Error('Signed out')
+    if (!account) throw new Error('Signed out')
+    stillCurrent(account)
     const url = new URL(
       `/teams/${encodeURIComponent(target.teamId)}/runtime-desktop/${encodeURIComponent(target.sessionId)}/${String(target.display)}`,
-      apiUrl(),
+      account.api,
     )
 
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } })
+    const socket = new WebSocket(url, { headers: { authorization: `Bearer ${account.token}` } })
     const send = (event: RuntimeDesktopEvent) => {
       if (!owner.isDestroyed()) owner.send('runtime-desktop:event', event)
     }
 
-    this.sessions.set(id, { owner, socket })
+    this.sessions.set(id, {
+      owner,
+      socket,
+      release: onPageGone(owner, () => this.close(owner, id)),
+    })
     socket.addEventListener('open', () => send({ id, type: 'open' }))
     socket.addEventListener('message', (event) => {
       if (typeof event.data === 'string') send({ id, type: 'data', data: event.data })
@@ -51,7 +56,6 @@ export class RuntimeDesktopSessions {
       send({ id, type: 'close' })
     })
     socket.addEventListener('error', () => socket.close())
-    owner.once('destroyed', () => this.close(owner, id))
   }
   input(owner: WebContents, id: string, data: string) {
     if (data.length > MAX_INPUT_CHARS) throw new Error('Desktop input is too large')
@@ -62,6 +66,7 @@ export class RuntimeDesktopSessions {
 
     if (!session) return
     this.sessions.delete(id)
+    session.release()
     session.socket.close()
   }
   closeAll() {

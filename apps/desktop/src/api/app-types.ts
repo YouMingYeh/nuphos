@@ -17,6 +17,8 @@ export type AgentChatDeepLinkPayload = {
 export type AppOpenDeepLinkPayload = {
   url: string
   path: string
+  /** The conversation whose dock the page opens in, instead of the one on screen. */
+  session?: string
 }
 
 // Emitted when the user clicks the "agent finished" native notification. The
@@ -101,6 +103,30 @@ export type LocalSkillImportResult = {
   keys: string[]
   /** Files the team store would have rejected for size. */
   skipped: string[]
+}
+
+/** One "Sync my setup" pass: this computer's Claude Code skills and CLAUDE.md, as personal ones. */
+export type LocalSetupResult = {
+  at: string
+  syncedSkills: number
+  uploadedFiles: number
+  removedSkills: number
+  skipped: {
+    name: string
+    reason: 'too_large' | 'too_many_files' | 'name_taken' | 'over_budget' | 'unreadable'
+  }[]
+  instruction: 'synced' | 'removed' | 'none' | 'too_long'
+  instructionParts: number
+  failed: string[]
+}
+
+export type LocalSetupStatus = {
+  autoSync: boolean
+  running: boolean
+  localSkills: number
+  claudeMdChars: number | null
+  last: LocalSetupResult | null
+  budget: { files: number; bytes: number }
 }
 
 export type PastedAttachmentPayload = {

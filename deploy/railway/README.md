@@ -10,15 +10,13 @@ specifications, with no Redis:
   Its single home volume also stores `/workspace`; initialization drops root
   privileges before starting the agent.
 
-The data spec reads the bootstrap scripts from `../zeabur/template.yaml`, so use
-a checkout of this repository, not a standalone copy of this directory.
 These are source templates. Only the runtime has a published marketplace template (see below).
 
 ## Deploy the data project
 
 Prerequisites: Node 22.18+, the current Railway CLI with `railway config` support,
 a Railway account with volume capacity, two custom domains whose DNS you control,
-and a Zeabur Email or Resend API key with a verified sender. The default data volumes are
+and a Resend API key with a verified sender. The default data volumes are
 10 GiB each in `us-west2`; services are explicitly placed in the same region.
 Keep service and volume regions aligned when customizing; changing an existing
 volume region can require a destructive replacement. Review capacity and pricing before applying.
@@ -31,8 +29,7 @@ chmod 600 .env
 ```
 
 Edit `.env` with your domains (hostnames only), email settings, and three independent
-random secrets. To send with Resend, set `NUPHOS_EMAIL_PROVIDER=resend` and
-`RESEND_API_KEY` instead of `ZSEND_API_KEY`. `openssl rand -hex 32` generates a suitable secret. Keep this file
+random secrets. `openssl rand -hex 32` generates a suitable secret. Keep this file
 private and stable across subsequent plans and redeploys; replacing Mongo's root
 password in the environment does not rotate the password in an existing database.
 The backend JWT secret must also remain stable.
@@ -110,13 +107,14 @@ not publish or create Railway resources in CI.
 npm ci
 npm run check
 npm test
-# Docker required: verifies the wrapper starts as uid 1000 and preserves home/workspace.
+# Docker required: tests the Mongo bootstrap across a restart, and verifies the
+# runtime wrapper starts as uid 1000 and preserves home/workspace.
 python3 smoke.py
 ```
 
 CI evaluates both specs with the official SDK, checks service/credential
-separation and shell syntax, tests the runtime wrapper across container
-replacement, and tests the shared Mongo bootstrap in the Zeabur job.
+separation and shell syntax, tests Mongo authentication and transactions
+across a restart, and tests the runtime wrapper across container replacement.
 Railway routing, DNS, email delivery and model inference require a real deployment
 and are not exercised by these offline checks.
 

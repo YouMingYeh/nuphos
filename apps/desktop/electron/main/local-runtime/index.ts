@@ -6,13 +6,13 @@ import { app, BrowserWindow, powerMonitor, shell } from 'electron'
 import { createDockTerminalStream } from '../../agent/dock-terminal.ts'
 import { callJson } from '../../agent/http.ts'
 import { logLocalTool } from '../../agent/local-exec.ts'
-import { apiUrl, deviceRegistrationAllowed, onApiUrlChange } from '../../api-endpoint.ts'
+import { apiUrl, deviceRegistrationAllowed } from '../../api-endpoint.ts'
 import { authSession } from '../../auth-session.ts'
-import { unverifiedTokenSubject } from '../../auth-status.ts'
 import { CLIENT_VERSION_HEADER, CLIENT_VERSION_VALUE } from '../../client-version.ts'
 import { resolveShellEnv } from '../../shell-env.ts'
 import { syncDeviceRegistration } from '../device-controller.ts'
 import { readDeviceIdentity } from '../device-identity.ts'
+import { readDeviceMetrics } from '../device-metrics.ts'
 import { isDev } from '../env.ts'
 
 import { LOCAL_AGENT_PROVIDERS, findAgentCli, probeAgentCli, readAgentUsage } from './agent-cli.ts'
@@ -26,12 +26,14 @@ import { agentCliEnv, agentEnv, readBundle } from './config.ts'
 import { LocalRuntimeController } from './controller.ts'
 import { localToolStreams } from './cua-stream.ts'
 import { devBundleHint, watchDevBundle } from './dev-bundle.ts'
+import { tunnelUrlFor } from './device-credential.ts'
 import { enableMacScreen, macScreenDeps } from './mac-screen.ts'
 import { probeLocalModels } from './model-probe.ts'
 import { OpenabProcess } from './openab-process.ts'
 import * as sleep from './sleep-prevention-electron.ts'
 import { RuntimeTunnelClient } from './tunnel-client.ts'
 
+import type { AccountContext } from '../../auth-session.ts'
 import type { LocalRuntimeBundle } from './config.ts'
 import type { LocalRuntimeState, LocalRuntimeViewState } from './controller-types.ts'
 
@@ -54,12 +56,6 @@ const findBundle = (): LocalRuntimeBundle | null => readBundle(bundleRoot())
 
 export async function userEnv(): Promise<NodeJS.ProcessEnv> {
   return { ...process.env, ...((await resolveShellEnv()) ?? {}) }
-}
-
-function tunnelUrl(): string {
-  const { deviceId } = readDeviceIdentity()
-
-  return `${apiUrl().replace(/^http/u, 'ws')}/agent/devices/${encodeURIComponent(deviceId)}/runtime-tunnel`
 }
 
 function broadcastState(): void {
@@ -92,7 +88,7 @@ const controller: LocalRuntimeController = new LocalRuntimeController({
     const bundle = findBundle()
     const adapter = bundle?.adapters[provider]
 
-    if (!bundle || !adapter) return Promise.reject(new Error('The local agent is not bundled'))
+    if (!bundle || !adapter) return Promise.reject(new Error('The local runtime is not bundled'))
 
     return probeLocalModels({
       nodeExecPath: process.execPath,
@@ -116,15 +112,18 @@ const controller: LocalRuntimeController = new LocalRuntimeController({
   createTunnel: (runtime, status, onChange, instances) => {
     tunnel = new RuntimeTunnelClient({
       instances,
+      sampleMetrics: readDeviceMetrics,
       activity: sleep.taskActivity,
-      connectBackend: () => {
+      connectBackend: (reclaim) => {
         if (!deviceRegistrationAllowed(isDev))
-          throw new Error('Development builds do not register devices with Nuphos Cloud')
-        const token = authSession.current()
+          throw new Error('Development builds do not register computers with Nuphos Cloud')
+        const { api, token } = authSession.context()
 
         if (!token) throw new Error('Not signed in')
 
-        return new WebSocket(tunnelUrl(), {
+        const url = tunnelUrlFor(api, readDeviceIdentity().deviceId, reclaim)
+
+        return new WebSocket(url.replace(/^http/u, 'ws'), {
           headers: {
             authorization: `Bearer ${token}`,
             [CLIENT_VERSION_HEADER]: CLIENT_VERSION_VALUE,
@@ -194,7 +193,7 @@ async function startLocalLogin(provider: CliLoginProvider) {
       ? (env.CODEX_HOME ?? path.join(env.HOME ?? app.getPath('home'), '.codex'))
       : prepareAgentHome(provider, userDir, path.join(userDir, 'workspace'))
 
-  if (!cliPath || !agentHome) throw new Error('Install the agent on this computer first.')
+  if (!cliPath || !agentHome) throw new Error('Install the runtime on this computer first.')
 
   mkdirSync(agentHome, { recursive: true, mode: 0o700 })
 
@@ -219,9 +218,10 @@ export function cancelLocalCodexLogin(): void {
 /** The runtime follows the signed-in account: any change of session stops it first. */
 export function initLocalRuntime(): void {
   sleep.initSleepPrevention(broadcastState)
-  const follow = (token: string | null) => {
-    const userId =
-      token && deviceRegistrationAllowed(isDev) ? (unverifiedTokenSubject(token) ?? null) : null
+  // A new backend always comes with a new session, so this one subscription
+  // also follows the endpoint.
+  const follow = (account: Pick<AccountContext, 'token' | 'userId'>) => {
+    const userId = account.token && deviceRegistrationAllowed(isDev) ? account.userId : null
 
     if (userId !== controller.state().userId) {
       cancelLocalClaudeLogin()
@@ -231,8 +231,7 @@ export function initLocalRuntime(): void {
   }
 
   authSession.subscribe(follow)
-  onApiUrlChange(() => follow(authSession.current()))
-  follow(authSession.current())
+  follow(authSession.context())
   if (devBuild())
     watchDevBundle(bundleRoot(), {
       bundle: () => void controller.refresh(true),

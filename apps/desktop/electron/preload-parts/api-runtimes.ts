@@ -13,6 +13,8 @@ export const runtimeApi = {
     ipcRenderer.invoke('atlas:readRuntimeFile', teamId, runtimeId, sessionId, path),
   atlasReadLinkedFile: (teamId: string, runtimeId: string, sessionId: string, path: string) =>
     ipcRenderer.invoke('atlas:readLinkedFile', teamId, runtimeId, sessionId, path),
+  atlasTransferLinkedFile: (teamId: string, runtimeId: string, sessionId: string, path: string) =>
+    ipcRenderer.invoke('atlas:transferLinkedFile', teamId, runtimeId, sessionId, path),
   atlasOpenHtmlFile: (
     local: boolean,
     teamId: string,
@@ -57,8 +59,8 @@ export const runtimeApi = {
     ipcRenderer.invoke('atlas:getRuntimeModelConfig', teamId, runtimeId, pick),
   atlasRequestRuntimeUpdate: (teamId: string, runtimeId: string) =>
     ipcRenderer.invoke('atlas:requestRuntimeUpdate', teamId, runtimeId),
-  atlasGetRuntimeInstanceStatus: (teamId: string, runtimeId: string) =>
-    ipcRenderer.invoke('atlas:getRuntimeInstanceStatus', teamId, runtimeId),
+  atlasGetRuntimeInstanceStatus: (teamId: string, runtimeId: string, wake?: boolean) =>
+    ipcRenderer.invoke('atlas:getRuntimeInstanceStatus', teamId, runtimeId, wake),
   atlasGetRuntimeInstanceMetrics: (teamId: string, runtimeId: string, hours: number) =>
     ipcRenderer.invoke('atlas:getRuntimeInstanceMetrics', teamId, runtimeId, hours),
 }

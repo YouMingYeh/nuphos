@@ -1,5 +1,7 @@
 package ai.nuphos.android.session
 
+import kotlinx.coroutines.ensureActive
+
 import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.snapshotFlow
@@ -10,6 +12,7 @@ import ai.nuphos.android.data.ConversationReadApi
 import ai.nuphos.android.data.ConversationActions
 import ai.nuphos.android.data.NuphosApi
 import ai.nuphos.android.model.AgentConversation
+import ai.nuphos.android.model.ConversationSort
 import ai.nuphos.android.model.ConversationScope
 import ai.nuphos.android.model.CredentialCatalog
 import ai.nuphos.android.model.CredentialSelection
@@ -76,6 +79,8 @@ class AgentStore(
 
     var scope: ConversationScope by mutableStateOf(ConversationScope.Mine)
         private set
+    var sort by mutableStateOf(ConversationSort.Created)
+        private set
     var search by mutableStateOf("")
         private set
 
@@ -116,7 +121,15 @@ class AgentStore(
         }
     }
 
+    fun refreshOnResume() {
+        if (disposed || !hasAiAccess() || selectedTeam == null) return
+        // A read started before leaving may predate changes made on another client.
+        refreshRequests.invalidate()
+        refresh()
+    }
+
     private fun resetHistory() {
+        searchJob?.cancel()
         refreshRequests.invalidate()
         isReloading = false
         loadGeneration++
@@ -140,6 +153,49 @@ class AgentStore(
         resetHistory()
         storeScope.launch { reload() }
     }
+    fun foldedThreadIds(accountId: String?, teamId: String?): Set<String> {
+        if (accountId == null || teamId == null) return emptySet()
+        return prefs.getStringSet("agent.folded.$accountId.$teamId", emptySet()).orEmpty().toSet()
+    }
+    fun saveFoldedThreadIds(accountId: String?, teamId: String?, ids: Set<String>) {
+        if (accountId == null || teamId == null || selectedTeam?.id != teamId || !hasAiAccess()) return
+        prefs.edit().putStringSet("agent.folded.$accountId.$teamId", ids.toSet()).apply()
+    }
+    private class PinnedHistoryOwner(val teamId: String, val generation: Int, val workspace: Long)
+    private var pinnedHistoryOwner by mutableStateOf<PinnedHistoryOwner?>(null)
+    val loadingPinnedHistory: Boolean
+        get() = pinnedHistoryOwner?.let {
+            it.teamId == selectedTeam?.id && it.generation == loadGeneration && it.workspace == workspaceRevision
+        } == true
+    private suspend fun loadMissingPinnedHistory() {
+
+        if (loadingPinnedHistory || phase != Phase.Loaded || isReloading || search.isNotEmpty() || archivedOnly) return
+        val teamId = selectedTeam?.id ?: return
+        val generation = loadGeneration
+        val workspace = workspaceRevision
+        val owner = PinnedHistoryOwner(teamId, generation, workspace)
+        pinnedHistoryOwner = owner
+        try {
+            // Pins can predate hundreds of rows. Stop on resolved pins or server
+            // exhaustion, not an arbitrary page count; reject repeated cursors.
+            val visitedCursors = mutableSetOf<String>()
+            while (true) {
+                if (disposed || !hasAiAccess() || selectedTeam?.id != teamId || generation != loadGeneration || workspace != workspaceRevision || search.isNotEmpty() || archivedOnly || !hasMore || isLoadingMore) return
+                val loaded = conversations.map { it.sessionId }.toSet()
+                if (pinnedShortcuts.all { it.sessionId in loaded }) return
+                val before = nextCursor ?: return
+                if (!visitedCursors.add(before)) return
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                loadMore(allowDuringRefresh = true)
+
+                if (nextCursor == before) return
+            }
+        } finally {
+            // A held request from an earlier scope must not clear the latest owner.
+            if (pinnedHistoryOwner === owner) pinnedHistoryOwner = null
+        }
+    }
+
     suspend fun loadFavorites() {
         val team = selectedTeam ?: return
         if (!hasAiAccess()) return
@@ -150,11 +206,12 @@ class AgentStore(
             if (!favoritesRequests.accepts(ticket, selectedTeam?.id, hasAiAccess())) return
             favorites = loaded
             favoritesError = null
+            loadMissingPinnedHistory()
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             if (favoritesRequests.accepts(ticket, selectedTeam?.id, hasAiAccess()))
-                favoritesError = e.message ?: "Could not load pinned chats."
+                favoritesError = e.message ?: "Could not load pinned agents."
         } finally {
             if (favoritesRequests.accepts(ticket, selectedTeam?.id, hasAiAccess())) favoritesLoading = false
         }
@@ -167,17 +224,72 @@ class AgentStore(
         if (favoritesRequests.accepts(ticket, selectedTeam?.id, hasAiAccess())) { favorites = saved; favoritesError = null }
     }
     suspend fun rename(session: ChatSession, title: String) {
-        require(session.canManage) { "Only the owner can rename this chat." }
+        require(session.canManage) { "Only the owner can rename this agent." }
         ConversationActions.rename(token, session.teamId, session.sessionId, title)
         session.reloadFromServer()
         reload()
     }
     suspend fun archive(session: ChatSession, archived: Boolean) {
-        require(session.canManage) { "Only the owner can archive this chat." }
+        require(session.canManage) { "Only the owner can archive this agent." }
         ConversationActions.archive(token, session.teamId, session.sessionId, archived)
         session.reloadFromServer()
         reload()
     }
+
+    var rowActionSessionId: String? by mutableStateOf(null)
+        private set
+    var rowActionError: String? by mutableStateOf(null)
+        private set
+    fun clearRowActionError() { rowActionError = null }
+    fun canPin(row: AgentConversation) = currentActionRow(row) != null && favorites != null && !favoritesLoading
+    fun canArchive(row: AgentConversation) = currentActionRow(row)?.let {
+        (it.canManage ?: (it.isOwner == true)) && it.readOnly != true
+    } == true
+
+    private fun currentActionRow(row: AgentConversation): AgentConversation? {
+        val team = selectedTeam?.id ?: return null
+        if (disposed || !hasAiAccess() || (row.teamId != null && row.teamId != team)) return null
+        return conversations.firstOrNull { it.sessionId == row.sessionId && (it.teamId ?: team) == team }
+    }
+
+    /** Read fresh server metadata without opening a chat or resuming its active turn. */
+    private suspend fun rowAction(row: AgentConversation, archive: Boolean?, pinned: Boolean?) {
+        val current = currentActionRow(row) ?: return
+        val team = selectedTeam?.id ?: return
+        if (rowActionSessionId != null || (pinned != null && !canPin(current)) ||
+            (archive != null && (!canArchive(current) || current.isArchived != row.isArchived))) return
+        val revision = workspaceRevision
+        fun valid() = !disposed && hasAiAccess() && selectedTeam?.id == team && workspaceRevision == revision && currentActionRow(row) != null
+        rowActionSessionId = current.sessionId
+        rowActionError = null
+        try {
+            val detail = NuphosApi.conversationDetail(token, team, current.sessionId)
+            if (!valid()) return
+            if (archive != null) {
+                require(detail.readOnly != true && (detail.canManage ?: (detail.isOwner == true)))
+                // A retained confirmation must not invert a concurrently changed archive state.
+                require((detail.archivedAt != null) == row.isArchived)
+                ConversationActions.archive(token, team, current.sessionId, archive)
+                if (valid()) reload()
+            } else if (pinned != null) {
+                if (!canPin(current)) return
+                val ticket = favoritesRequests.begin(team)
+                val saved = ConversationActions.pin(token, team, current.sessionId, detail.title ?: current.displayTitle, pinned)
+                if (valid() && favoritesRequests.accepts(ticket, selectedTeam?.id, hasAiAccess())) {
+                    favorites = saved
+                    favoritesError = null
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            if (valid()) rowActionError = "Action failed. Refresh the list and try again."
+        } finally {
+            if (workspaceRevision == revision) rowActionSessionId = null
+        }
+    }
+    suspend fun pin(row: AgentConversation, pinned: Boolean) = rowAction(row, archive = null, pinned = pinned)
+    suspend fun archive(row: AgentConversation, archived: Boolean) = rowAction(row, archive = archived, pinned = null)
 
     var watchingSessionId: String? by mutableStateOf(null)
         private set
@@ -280,8 +392,8 @@ class AgentStore(
             if (isCurrent()) unlinkError = when {
                 e is NuphosApi.Failure.Unauthorized -> "Your session has expired. Please sign in again."
                 e is ai.nuphos.android.data.AgentChatApi.Conflict.Other && e.status in setOf(403, 404) ->
-                    "This chat is unavailable or you no longer have permission to unlink it."
-                else -> "Could not unlink chat. Try again."
+                    "This agent is unavailable or you no longer have permission to unlink it."
+                else -> "Could not unlink agent. Try again."
             }
         } finally {
             if (isCurrent()) unlinkingSessionId = null
@@ -316,6 +428,13 @@ class AgentStore(
             snapshotFlow { hasAiAccess() }.first { !it }
             disposeForConsent()
         }
+    }
+
+    fun updateSort(value: ConversationSort) {
+        if (disposed || !hasAiAccess() || value == sort) return
+        sort = value
+        resetHistory()
+        storeScope.launch { reload() }
     }
 
     fun updateScope(value: ConversationScope) {
@@ -377,6 +496,8 @@ class AgentStore(
             val pick = loaded.firstOrNull { it.id == remembered } ?: loaded.firstOrNull()
             if (pick != selectedTeam) {
                 workspaceRevision++
+                rowActionSessionId = null
+                rowActionError = null
                 watchingSessionId = null
                 watchError = null
                 unlinkingSessionId = null
@@ -410,6 +531,8 @@ class AgentStore(
             val refreshed = saved.firstOrNull { it.id == old.id }
             if (refreshed == null) {
                 workspaceRevision++
+                rowActionSessionId = null
+                rowActionError = null
                 watchingSessionId = null
                 watchError = null
                 unlinkingSessionId = null
@@ -422,6 +545,8 @@ class AgentStore(
                 if (refreshed != old) {
                     credentials = credentials.reset()
                     workspaceRevision++
+                    rowActionSessionId = null
+                    rowActionError = null
                     watchingSessionId = null
                     watchError = null
                     unlinkingSessionId = null
@@ -439,6 +564,8 @@ class AgentStore(
         val verified = teams.firstOrNull { it.id == team.id } ?: return
         if (verified == selectedTeam) return
         workspaceRevision++
+        rowActionSessionId = null
+        rowActionError = null
         watchingSessionId = null
         watchError = null
         unlinkingSessionId = null
@@ -494,10 +621,11 @@ class AgentStore(
                 scope = scope,
                 search = search,
                 archivedOnly = archivedOnly,
+                sort = sort,
             )
             if (generation != loadGeneration || selectedTeam?.id != team.id || workspace != workspaceRevision || disposed || !hasAiAccess()) return
-            observeHistory(page.conversations, team.id, observedAt)
-            conversations = mergeHistory(page.conversations, team.id)
+            observeHistory(page.rows, team.id, observedAt)
+            conversations = mergeHistory(page.rows, team.id).distinctBy { it.sessionId }
             nextCursor = page.nextCursor
             hasMore = page.hasMore
             phase = Phase.Loaded
@@ -513,16 +641,19 @@ class AgentStore(
                 isReloading = false
                 if (phase == Phase.Loading) {
                     phase = if (hasLoadedHistory) Phase.Loaded else Phase.Failed
-                    if (!hasLoadedHistory) phaseError = "Chat refresh was interrupted. Try again."
+                    if (!hasLoadedHistory) phaseError = "Agent list refresh was interrupted. Try again."
                 }
             }
         }
+        loadMissingPinnedHistory()
     }
 
-    suspend fun loadMore() {
+    suspend fun loadMore() = loadMore(allowDuringRefresh = false)
+
+    private suspend fun loadMore(allowDuringRefresh: Boolean) {
         val team = selectedTeam
         val cursor = nextCursor
-        if (disposed || !hasAiAccess() || isRefreshing || isReloading || phase != Phase.Loaded || !hasMore || isLoadingMore || team == null || cursor == null) return
+        if (disposed || !hasAiAccess() || (!allowDuringRefresh && isRefreshing) || isReloading || phase != Phase.Loaded || !hasMore || isLoadingMore || team == null || cursor == null) return
         isLoadingMore = true
         val generation = loadGeneration
         val workspace = workspaceRevision
@@ -536,10 +667,11 @@ class AgentStore(
                 scope = scope,
                 search = search,
                 archivedOnly = archivedOnly,
+                sort = sort,
             )
             if (generation != loadGeneration || selectedTeam?.id != team.id || workspace != workspaceRevision || disposed || !hasAiAccess()) return
-            observeHistory(page.conversations, team.id, observedAt)
-            val merged = mergeHistory(page.conversations, team.id)
+            observeHistory(page.rows, team.id, observedAt)
+            val merged = mergeHistory(page.rows, team.id).distinctBy { it.sessionId }
             val seen = conversations.map { it.sessionId }.toSet()
             conversations = conversations.map { current ->
                 merged.firstOrNull { it.sessionId == current.sessionId && (it.teamId ?: team.id) == (current.teamId ?: team.id) } ?: current
@@ -616,6 +748,8 @@ class AgentStore(
         credentials = credentials.reset()
         membershipRequest++
         workspaceRevision++
+        rowActionSessionId = null
+        rowActionError = null
         watchingSessionId = null
         watchError = null
         unlinkingSessionId = null

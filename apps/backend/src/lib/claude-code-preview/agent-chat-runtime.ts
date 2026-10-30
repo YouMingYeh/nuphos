@@ -7,33 +7,37 @@ import {
   setClaudeCodeAutonomousUpdateHandler,
 } from './autonomous-session-observer'
 import { backgroundWorkPrompt, markBackgroundWorkLost } from './background-work'
-import { retractedPrompt } from './retracted-notice'
-import { lastTextChunkTracker, settledCodexStopReason } from './codex-turn-settle'
-import { OpenAbRpcError } from './openab-acp-errors'
+import { settledCodexStopReason } from './codex-turn-settle'
 import { openConversationSession } from './open-conversation-session'
-import { refusal } from './runtime-refusal'
+import { OpenAbRpcError } from './openab-acp-errors'
+import { redactedPromptUpdates } from './redacted-prompt-updates'
+import { retractedPrompt } from './retracted-notice'
 import { materializeRuntimeAttachments } from './runtime-attachments'
 import {
   assertConversationRuntimeAvailable,
   assertRuntimeNotDeleting,
 } from './runtime-portability-store'
-import { previewSessionPrincipalChanged, sessionContextStale } from './session-context'
-import { conversationExecutionState } from './session-execution-state'
+import { refusal } from './runtime-refusal'
+import {
+  previewSessionPrincipalChanged,
+  sessionContextStale,
+  turnDefaults,
+} from './session-context'
+import { probeExecutionState } from './session-execution-state'
 import { observeSession, resumeSessionOn } from './session-reattach'
 import {
   MAX_PREVIEW_CONVERSATION_ID_LENGTH,
   cancelActiveTeamTurn,
   previewRuntimeCwd,
 } from './team-openab-runtime'
+import { RuntimeStateProbeError } from './turn-diagnostics'
 
+import type { previewSessionAccess } from './credentials-mcp'
 import type { AcpHttpMcpServer, PreviewAgentUpdate } from './openab-acp-client'
 import type { OpenAbPermissionHandler, OpenAbSessionRuntime } from './openab-acp-session'
 import type { RuntimeAttachment } from './runtime-attachments'
 import type { TeamRuntimeEndpoint, TeamSession } from './team-openab-runtime'
 
-import type { previewSessionAccess } from './credentials-mcp'
-import { redactStreamedUpdates } from './streamed-token-redaction'
-import { RENEWED_TOKEN_TTL_SEC, renewTurnCredentials } from './turn-credential-renewal'
 export {
   previewRuntimeObservability,
   cancelPreviewConversationSession,
@@ -85,11 +89,12 @@ export async function runClaudeCodePreviewPrompt(args: {
   /** History preamble, resolved lazily when creating a fresh inner session. */
   freshSessionMessage?: (uncertain?: boolean) => string
   signal: AbortSignal
-  onTextDelta: (text: string) => void
+  onTextDelta: (
+    text: string,
+    metadata?: import('./preview-agent-update').PreviewTextMetadata,
+  ) => void
   onAgentUpdate?: (update: PreviewAgentUpdate) => void
   onPermissionRequest?: OpenAbPermissionHandler
-  /** Re-mints this turn's MCP servers and runtime env with the given token lifetime. */
-  renewAccess?: NonNullable<ReturnType<typeof previewSessionAccess>['renew']>
 }): Promise<{ stopReason: string }> {
   if (args.conversationId.length > MAX_PREVIEW_CONVERSATION_ID_LENGTH) {
     throw new Error('Conversation id is invalid.')
@@ -118,7 +123,7 @@ export async function runClaudeCodePreviewPrompt(args: {
 
   // Query runtime admission without attaching a replacement prompt socket.
   const observe = () =>
-    conversationExecutionState({
+    probeExecutionState({
       teamId: session.teamId,
       sessionId: session.conversationId,
       userId: session.conversationOwnerUserId ?? session.userId,
@@ -128,6 +133,8 @@ export async function runClaudeCodePreviewPrompt(args: {
         runtimeUrl: session.endpoint.url,
         openabSessionId: session.openabSessionId,
       },
+    }).catch((cause: unknown) => {
+      throw new RuntimeStateProbeError(cause)
     })
   const observed = await observe()
 
@@ -156,18 +163,16 @@ export async function runClaudeCodePreviewPrompt(args: {
   const nextContext = {
     mcpServers: args.mcpServers ?? session.mcpServers,
     systemPrompt: args.systemPrompt ?? (principalChanged ? undefined : session.systemPrompt),
-    runtime:
-      args.runtime || principalChanged
-        ? { ...args.runtime, defaults: session.runtime?.defaults }
-        : session.runtime,
+    runtime: {
+      ...(args.runtime || principalChanged ? args.runtime : session.runtime),
+      defaults: turnDefaults(session, currentAttachment),
+    },
     userId: args.userId,
     conversationOwnerUserId: args.conversationOwnerUserId ?? args.userId,
     locale: args.locale,
   }
   const activeTurn = { cancelled: cancels(args.signal) } as NonNullable<TeamSession['activeTurn']>
-  let renewal: ReturnType<typeof renewTurnCredentials> | undefined
   const onAbort = () => {
-    if (args.signal.reason instanceof RunHandoff) void renewal?.handOff()
     if (!cancels(args.signal)) return
     activeTurn.cancelled = true
     if (session.activeTurn === activeTurn) cancelActiveTeamTurn(session)
@@ -181,23 +186,6 @@ export async function runClaudeCodePreviewPrompt(args: {
 
     activeTurn.client = client
     if (activeTurn.cancelled) return { stopReason: 'cancelled' }
-    // A runtime that takes credentials mid-turn gets short-lived tokens, renewed
-    // for as long as this turn runs; older runtimes keep the long default. Desktop
-    // shells do not re-read the token file yet, so local runtimes keep it too.
-    const renew = client.credentialRefresh && !session.endpoint.local ? args.renewAccess : undefined
-    const refresh = client.refreshCredentials?.bind(client)
-
-    if (renew && refresh) {
-      const access = renew(RENEWED_TOKEN_TTL_SEC)
-
-      nextContext.mcpServers = access.mcpServers
-      nextContext.runtime = { ...nextContext.runtime, env: access.runtimeEnv }
-      renewal = renewTurnCredentials({
-        installed: access.runtimeEnv,
-        renew,
-        refresh: (expected, next) => refresh(session.openabSessionId, expected, next),
-      })
-    }
     // MCP tokens, runtime environment, and the personal portion of the system
     // prompt are execution-principal scoped. A shared Slack conversation can
     // legitimately switch actors between serialized turns; re-load even on
@@ -245,23 +233,15 @@ export async function runClaudeCodePreviewPrompt(args: {
     ]
       .filter(Boolean)
       .join('\n\n')
-    const text = lastTextChunkTracker(args.onTextDelta)
-    const live = redactStreamedUpdates((update) => {
-      if (update.kind === 'text') text.onTextDelta(update.text)
-      else if (update.kind === 'agent') args.onAgentUpdate?.(update.update)
-    })
+    const text = redactedPromptUpdates(args.onTextDelta, args.onAgentUpdate)
     // A refusal or transport failure does not grant authority to cancel or
     // replace the runtime session. Its snapshot remains the lifecycle source.
     const result = await client
       .prompt(
         session.openabSessionId,
         args.text,
-        (delta) => {
-          live.deliver({ kind: 'text', text: delta })
-        },
-        (update) => {
-          live.deliver({ kind: 'agent', update })
-        },
+        text.onTextDelta,
+        text.onAgentUpdate,
         args.onPermissionRequest,
         () => {
           // Runtime admission, not a backend flag, selects the command whose
@@ -281,12 +261,11 @@ export async function runClaudeCodePreviewPrompt(args: {
           : error
       })
       .finally(() => {
-        live.flush()
+        text.flush()
       })
 
     return { stopReason: await settledCodexStopReason(session, result, text.last()) }
   } finally {
-    renewal?.stop()
     args.signal.removeEventListener('abort', onAbort)
     if (session.activeTurn === activeTurn) {
       session.activeTurn = undefined

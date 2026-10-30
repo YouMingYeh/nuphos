@@ -1,10 +1,13 @@
 import { clsx } from 'clsx'
 import { Maximize2, Minimize2, PanelRight } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { Kbd } from '../../components/ui/kbd'
 import { Tooltip } from '../../components/ui/tooltip'
+import { t } from '../../i18n'
+import { comboText } from '../../lib/platform'
 
+import { cycleFocusRegion, moveFocusWithDock } from './dockFocus'
 import { WorkspaceMainPane } from './WorkspaceMainPane'
 import { useWorkspacePane } from './WorkspacePaneContext'
 import { WorkspaceTabStrip } from './WorkspaceTabStrip'
@@ -49,18 +52,40 @@ export function WorkspaceDockPanels({ ws, user }: { ws: WorkspaceController; use
   }, [dragging])
 
   useEffect(() => localStorage.setItem('nuphos.workspaceDockWidthVw', String(widthVw)), [widthVw])
+  // The chat column beside the dock lays out at its settled width from this.
+  useLayoutEffect(() => {
+    dockRef.current?.parentElement?.style.setProperty(
+      '--workspace-dock-width',
+      `${String(widthVw)}cqw`,
+    )
+  }, [widthVw, scope?.teamId])
 
   useEffect(() => {
     if (!dockOpen) setWorkspaceDockExpanded(false)
   }, [dockOpen, setWorkspaceDockExpanded])
 
-  // ⇧⌘↩ — expand or restore the dock; from closed it opens straight to expanded.
+  // ⌘J opens or closes the dock, taking the caret along. ⇧⌘↩ expands or
+  // restores it; from closed it opens straight to expanded.
   const paneActive = useWorkspacePane()?.active ?? true
 
   useEffect(() => {
     if (!paneActive || !scope?.teamId || typeof window.api.onAppShortcut !== 'function') return
 
     return window.api.onAppShortcut((action) => {
+      if (action === 'focus-next-region' || action === 'focus-previous-region') {
+        // Not behind Settings or a takeover, the gate the chat's own keys use.
+        if (ws.chatShortcutsLive) {
+          cycleFocusRegion(dockRef.current, dockOpen, action === 'focus-next-region' ? 1 : -1)
+        }
+
+        return
+      }
+      if (action === 'toggle-dock') {
+        workspaceActions.toggleDock()
+        window.requestAnimationFrame(() => moveFocusWithDock(dockRef.current, !dockOpen))
+
+        return
+      }
       if (action !== 'toggle-dock-expanded') return
       if (dockOpen) {
         setWorkspaceDockExpanded((expanded) => !expanded)
@@ -70,7 +95,14 @@ export function WorkspaceDockPanels({ ws, user }: { ws: WorkspaceController; use
       workspaceActions.setDockOpen(true)
       setWorkspaceDockExpanded(true)
     })
-  }, [paneActive, scope?.teamId, dockOpen, workspaceActions, setWorkspaceDockExpanded])
+  }, [
+    paneActive,
+    scope?.teamId,
+    dockOpen,
+    workspaceActions,
+    setWorkspaceDockExpanded,
+    ws.chatShortcutsLive,
+  ])
 
   return (
     <>
@@ -123,7 +155,7 @@ export function WorkspaceDockPanels({ ws, user }: { ws: WorkspaceController; use
             side="bottom"
             content={
               <span className="flex items-center gap-2">
-                {workspaceDockExpanded ? 'Restore workspace panel' : 'Expand workspace panel'}
+                {workspaceDockExpanded ? t('Restore workspace panel') : t('Expand workspace panel')}
                 <Kbd combo="mod+shift+enter" />
               </span>
             }
@@ -136,7 +168,7 @@ export function WorkspaceDockPanels({ ws, user }: { ws: WorkspaceController; use
                 workspaceDockExpanded ? 'bg-zGray-800/60 text-main' : 'text-secondary',
               )}
               aria-label={
-                workspaceDockExpanded ? 'Restore workspace panel' : 'Expand workspace panel'
+                workspaceDockExpanded ? t('Restore workspace panel') : t('Expand workspace panel')
               }
               aria-pressed={workspaceDockExpanded}
             >
@@ -157,8 +189,8 @@ export function WorkspaceDockPanels({ ws, user }: { ws: WorkspaceController; use
             'workspace-dock-toggle titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-zGray-800/60 hover:text-main',
             dockOpen ? 'bg-zGray-800/60 text-main' : 'text-secondary',
           )}
-          title={dockOpen ? 'Close workspace panel' : 'Open workspace panel'}
-          aria-label={dockOpen ? 'Close workspace panel' : 'Open workspace panel'}
+          title={`${dockOpen ? t('Close workspace panel') : t('Open workspace panel')} (${comboText('mod+j')})`}
+          aria-label={dockOpen ? t('Close workspace panel') : t('Open workspace panel')}
           aria-pressed={dockOpen}
         >
           <PanelRight className="h-4 w-4" strokeWidth={1.7} />

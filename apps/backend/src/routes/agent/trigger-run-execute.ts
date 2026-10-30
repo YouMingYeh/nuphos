@@ -5,6 +5,7 @@ import { getConversationBySessionId } from '@/lib/agent/db'
 import { regionLabel } from '@/lib/agent/model-provider'
 import { startTraceSpan } from '@/lib/agent/tracing'
 import { resolveConversationChatRuntime } from '@/lib/claude-code-preview/agent-chat-runtime'
+import { fallBackBeforeTurn } from '@/lib/claude-code-preview/runtime-fallback'
 import { logError, logEvent } from '@/lib/observability'
 import { getSlackAgentThreadBySessionId } from '@/lib/slack/agent-bot'
 
@@ -18,7 +19,6 @@ import {
   finishAgentRun,
 } from './run-frames'
 import { HUMAN_SENDER_SOURCES, attachAgentRunFrameSink, createAgentRun } from './run-registry'
-import { serializeTelemetryMessages } from './telemetry'
 import { persistAcceptedConversationTurn } from './transcript'
 import { recordTriggerRunFailure } from './trigger-run-observability'
 import { acceptAgentRun } from './turn-start-frame'
@@ -84,8 +84,17 @@ export async function executeAgentForTrigger(params: TriggerRunParams): Promise<
   const requestId = randomUUID()
   const streamId = randomUUID()
   const isPotentialNewConversation = messages.length === 1 && messages[0]?.role === 'user'
-  const existingConversation = await getConversationBySessionId(sessionId)
-  const chatRuntime = await resolveConversationChatRuntime(teamId, existingConversation, { userId })
+  // Callers hold the session's run claim before an existing conversation runs.
+  const existingConversation = await fallBackBeforeTurn(
+    await getConversationBySessionId(sessionId),
+    userId,
+    true,
+  )
+  const chatRuntime = await resolveConversationChatRuntime(teamId, existingConversation, {
+    userId,
+    sessionId,
+    source,
+  })
   const runtimeProvider = chatRuntime.runtime
   const runtimeModelId = chatRuntime.runtime
 
@@ -107,11 +116,7 @@ export async function executeAgentForTrigger(params: TriggerRunParams): Promise<
       modelId: runtimeModelId,
       region: regionLabel(),
       isNewConversation: isPotentialNewConversation,
-      conversationRootDeferred: true,
       messageCount: messages.length,
-    },
-    input: {
-      messages: serializeTelemetryMessages(messages),
     },
   })
 

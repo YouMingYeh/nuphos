@@ -427,11 +427,13 @@ fn trace_frame(s: &str) -> std::borrow::Cow<'_, str> {
         .and_then(|v| {
             v["method"]
                 .as_str()
-                .map(|m| m.starts_with("_openab/runtime/terminal/"))
+                .map(|m| m.starts_with("_openab/runtime/terminal/") || m == "_openab/runtime/job")
         })
         .unwrap_or(false)
     {
-        return std::borrow::Cow::Borrowed("[runtime terminal frame redacted]");
+        // Terminal input and job stdin can carry secrets (a secure input card's value
+        // rides an attachment job's stdin), so neither is ever traced.
+        return std::borrow::Cow::Borrowed("[runtime terminal or job frame redacted]");
     }
     const CAP: usize = 512;
     let total = s.chars().count();
@@ -440,6 +442,16 @@ fn trace_frame(s: &str) -> std::borrow::Cow<'_, str> {
     }
     let end = s.char_indices().nth(CAP).map_or(s.len(), |(i, _)| i);
     std::borrow::Cow::Owned(format!("{}…(+{} chars)", &s[..end], total - CAP))
+}
+
+/// The receipt is the sender's words, the steer's last text part. Text ahead of
+/// it (the sender's attribution header, file descriptions) is for the agent only.
+fn steering_receipt_text(prompt: &[Value]) -> &str {
+    prompt
+        .iter()
+        .rev()
+        .find_map(|part| part["text"].as_str())
+        .unwrap_or_default()
 }
 
 /// A steer carries text plus references to files the host already placed on the
@@ -2016,6 +2028,7 @@ async fn handle_acp_connection(
         let state = state.clone();
         let sessions = sessions.clone();
         let out_tx = out_tx.clone();
+        let connection_id = connection_id.clone();
         tokio::spawn(async move {
             let mut sent: HashMap<String, Value> = HashMap::new();
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -2031,6 +2044,19 @@ async fn handle_acp_connection(
                     .map(|(id, session)| (id.clone(), session.channel_id.clone()))
                     .collect();
                 for (id, channel) in channels {
+                    // A session another connection has since resumed or prompted reports there.
+                    // Pushing it here as well repeated every snapshot once per connection that
+                    // had ever held the session.
+                    let foreign = state.acp_reply_registry.as_ref().is_some_and(|registry| {
+                        registry
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&channel)
+                            .is_some_and(|sink| sink.owner != connection_id)
+                    });
+                    if foreign {
+                        continue;
+                    }
                     if let Some(snapshot) = read_runtime_snapshot(&state, &channel).await {
                         if sent.get(&id) == Some(&snapshot) {
                             continue;
@@ -2896,11 +2922,7 @@ async fn handle_acp_connection(
                                                 },
                                             );
                                             if let Some((session_id, output)) = route {
-                                                let text = prompt
-                                                    .iter()
-                                                    .filter_map(|part| part["text"].as_str())
-                                                    .collect::<Vec<_>>()
-                                                    .join("\n");
+                                                let text = steering_receipt_text(prompt);
                                                 let _ = output.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"steering_message","id":message_id,"text":text}}}).to_string());
                                             }
                                         }
@@ -3684,14 +3706,9 @@ async fn handle_session_config(
     } else {
         None
     };
+    // A restored session runs where its prompts run (its stored or configured working
+    // directory), so a client `cwd` here is ignored rather than allowed to move it.
     let restore = if let Some(context) = params.and_then(|p| p.get("restore")) {
-        let Some(cwd) = context
-            .get("cwd")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty() && s.len() <= 4096)
-        else {
-            return JsonRpcResponse::error(id, -32602, "Invalid restore working directory");
-        };
         if !mcp_enabled {
             return JsonRpcResponse::error(id, -32601, "Session restore context is disabled");
         }
@@ -3707,11 +3724,7 @@ async fn handle_session_config(
                 "Restore requires an explicit mcpServers array",
             );
         }
-        Some((
-            cwd.to_string(),
-            parse_http_mcp_servers(Some(context)),
-            Some(meta),
-        ))
+        Some((parse_http_mcp_servers(Some(context)), Some(meta)))
     } else {
         None
     };
@@ -7952,6 +7965,19 @@ mod acp_ws_integration {
     }
 
     #[test]
+    fn steering_receipt_is_the_last_text_part() {
+        let header =
+            json!({"type":"text","text":"<nuphos_message_metadata>{}</nuphos_message_metadata>"});
+        let link = json!({"type":"resource_link","uri":"file:///tmp/a.png","name":"a.png"});
+        let words = json!({"type":"text","text":"Focus on tests"});
+        assert_eq!(
+            steering_receipt_text(&[header, link, words.clone()]),
+            "Focus on tests"
+        );
+        assert_eq!(steering_receipt_text(&[words]), "Focus on tests");
+    }
+
+    #[test]
     fn steering_accepts_text_and_native_file_references_only() {
         let link = json!({"type":"resource_link","uri":"file:///tmp/shot.png","name":"shot.png"});
         let text = json!({"type":"text","text":"Look at this"});
@@ -8159,6 +8185,86 @@ mod acp_ws_integration {
             events.try_recv().is_err(),
             "a state read must not dispatch work"
         );
+    }
+
+    /// A session's runtime_state goes to the connection that holds it now, not to every
+    /// connection that ever resumed it: each extra copy crossed the same tunnel again.
+    #[tokio::test]
+    async fn runtime_state_is_pushed_only_to_the_connection_holding_the_session() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let mut state = crate::AppState::test_default(events);
+        state.acp = Some(AcpConfig {
+            auth_key: None,
+            control_key: None,
+            allowed_origins: vec![],
+            login_command: None,
+            auth_file: None,
+            runtime_jobs: RuntimeJobs::default(),
+            disk_paths: vec![],
+            credentials: None,
+            console: None,
+        });
+        state.acp_reply_registry = Some(new_reply_registry());
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider_busy = busy.clone();
+        state.acp_session_snapshot = Some(Arc::new(move |_| {
+            let busy = provider_busy.load(Ordering::SeqCst);
+            Box::pin(async move {
+                json!({"epoch": "provider", "revision": u64::from(busy), "state": if busy { "active" } else { "idle" }})
+            })
+        }));
+        let app = axum::Router::new()
+            .route("/acp", axum::routing::get(ws_upgrade))
+            .with_state(Arc::new(state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/acp", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let initialize = json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{"protocolVersion":1,"clientCapabilities":{"_meta":{"dev.openab/sessionSnapshots":true}}}});
+        let is_state = |f: &Value| f["params"]["update"]["sessionUpdate"] == "runtime_state";
+        // Frames for up to `ms`, so a push that should not come has had time to.
+        async fn drain(ws: &mut Ws, ms: u64) -> Vec<Value> {
+            let mut frames = vec![];
+            let until = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while let Ok(Some(Ok(WsMessage::Text(t)))) =
+                tokio::time::timeout_at(until, ws.next()).await
+            {
+                frames.push(serde_json::from_str(&t).unwrap());
+            }
+            frames
+        }
+
+        let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        send(&mut a, initialize.clone()).await;
+        let _ = recv(&mut a).await;
+        send(&mut a, json!({"jsonrpc":"2.0", "id":2, "method":"session/new", "params":{"cwd":"/w","mcpServers":[]}})).await;
+        let session_id = loop {
+            let f = recv(&mut a).await;
+            if f.get("id") == Some(&json!(2)) {
+                break f["result"]["sessionId"].as_str().unwrap().to_string();
+            }
+        };
+        assert!(
+            drain(&mut a, 600).await.iter().any(is_state),
+            "A holds the session"
+        );
+
+        let (mut b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        send(&mut b, initialize).await;
+        let _ = recv(&mut b).await;
+        send(&mut b, json!({"jsonrpc":"2.0", "id":2, "method":"session/resume", "params":{"sessionId":session_id,"cwd":"/w","mcpServers":[]}})).await;
+        let _ = drain(&mut b, 600).await;
+        let _ = drain(&mut a, 0).await;
+
+        busy.store(true, Ordering::SeqCst);
+        let on_b = drain(&mut b, 800).await;
+        let on_a = drain(&mut a, 800).await;
+        assert!(
+            on_b.iter().any(is_state),
+            "B now holds the session: {on_b:?}"
+        );
+        assert!(!on_a.iter().any(is_state), "A no longer holds it: {on_a:?}");
     }
 
     #[tokio::test]
@@ -8506,6 +8612,14 @@ mod acp_ws_integration {
         send(&mut ordinary, request.clone()).await;
         assert_eq!(recv(&mut ordinary).await["error"]["code"], -32003);
         assert!(!trace_frame(&request.to_string()).contains("secret-password"));
+    }
+
+    #[test]
+    fn runtime_job_frames_are_never_traced() {
+        let stdin = r#"{"files":[{"url":"data:application/octet-stream;base64,c2stc2VjcmV0"}]}"#;
+        let request = json!({"jsonrpc":"2.0","id":3,"method":"_openab/runtime/job","params":{"job":"attachments","stdin":stdin}});
+        let frame = request.to_string();
+        assert!(!trace_frame(&frame).contains("c2stc2VjcmV0"));
     }
 
     #[cfg(unix)]
@@ -11925,9 +12039,10 @@ mod session_config_tests {
                 operations.pending(&channel),
                 "explicit restore remains runtime work"
             );
+            // The client's cwd is not forwarded: a restore runs where the session's prompts run.
             assert_eq!(
                 request.restore,
-                Some(("/saved".into(), vec![], Some(json!({"owner":"fresh"}))))
+                Some((vec![], Some(json!({"owner":"fresh"}))))
             );
             request
                 .reply

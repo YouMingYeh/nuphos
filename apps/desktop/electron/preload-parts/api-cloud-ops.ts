@@ -1,6 +1,7 @@
 import type { ListConversationsOptions } from '../agent/conversations-list'
 import type { AgentProvider } from '../../src/types/runtime'
 import { ipcRenderer } from 'electron'
+import { withTranscriptTail } from '../agent/transcript-window.ts'
 
 export const cloudOpsApi = {
   cloudProbeCliVersion: (provider: string, probeId?: string) =>
@@ -222,18 +223,18 @@ export const cloudOpsApi = {
   atlasUnbindSentry: (teamId: string, bindingId: string) =>
     ipcRenderer.invoke('atlas:unbindSentry', teamId, bindingId),
   agentStart: (args: {
+    decisionReplyTo?: string
     agentRuntime?: AgentProvider
     runtimeId?: string
     streamId: string
     sessionId: string
     teamId?: string
-    messages: unknown[]
+    messages: { role?: unknown }[]
     baseIndex?: number
     locale?: string
     url?: string
-    // Current workspace tab's kubeconfig context, when one is bound. Forwarded
-    // to the backend as `X-Atlas-Kube-Context` so the agent can pass it to
-    // typed K8s tools (port_forward_start, etc.) without guessing.
+    // The workspace tab's bound kubeconfig context, sent as `X-Atlas-Kube-Context`
+    // so the agent passes it to typed K8s tools (port_forward_start, etc.) without guessing.
     kubeContext?: string
     diagramId?: string
     resume?: boolean
@@ -249,7 +250,7 @@ export const cloudOpsApi = {
       tailscaleClientIds: string[]
       zeaburIds: string[]
     }
-  }) => ipcRenderer.invoke('agent:start', args),
+  }) => ipcRenderer.invoke('agent:start', withTranscriptTail(args)),
   agentNotifyStopped: (args: { title: string; body: string; sessionId: string; teamId?: string }) =>
     ipcRenderer.invoke('agent:notifyStopped', args),
   agentAbort: (streamId: string) => ipcRenderer.invoke('agent:abort', streamId),
@@ -267,6 +268,8 @@ export const cloudOpsApi = {
     ipcRenderer.invoke('agent:listConversations', teamId, options),
   agentRenameConversation: (sessionId: string, title: string, teamId?: string) =>
     ipcRenderer.invoke('agent:renameConversation', sessionId, title, teamId),
+  agentSetConversationAvatar: (sessionId: string, avatar: string | null, teamId?: string) =>
+    ipcRenderer.invoke('agent:setConversationAvatar', sessionId, avatar, teamId),
   agentSetConversationArchived: (sessionId: string, archived: boolean, teamId?: string) =>
     ipcRenderer.invoke('agent:setConversationArchived', sessionId, archived, teamId),
   agentSetConversationWatched: (sessionId: string, watching: boolean, teamId?: string) =>
@@ -286,6 +289,8 @@ export const cloudOpsApi = {
     groupId?: string,
     queuedId?: string,
   ) => ipcRenderer.invoke('agent:steerConversation', sessionId, text, teamId, groupId, queuedId),
+  agentSaveSecret: (sessionId: string, name: string, value: string, teamId?: string) =>
+    ipcRenderer.invoke('agent:saveSecret', sessionId, name, value, teamId),
   agentSlackPickup: (sessionId: string, teamId?: string) =>
     ipcRenderer.invoke('agent:slackPickup', sessionId, teamId),
   agentListQueue: (sessionId: string, teamId?: string) =>

@@ -1,6 +1,8 @@
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome'
 import { useMemo, useState } from 'react'
 
+import { t } from '../i18n'
+
 import { AppAlertDialog } from './ui/alert-dialog'
 import { Menu, MenuContent, MenuItem, MenuSeparator } from './ui/menu'
 
@@ -45,24 +47,29 @@ type Props = {
  * collision-aware positioning, outside-click / Escape dismissal, and keyboard
  * navigation for free.
  */
-export function ContextMenu({ x, y, items, onClose }: Props) {
+export function ContextMenu({ x, y, items, onClose: dismiss }: Props) {
   const [confirmAction, setConfirmAction] = useState<ContextMenuAction | null>(null)
+  // The menu takes focus while open; closing hands it back, e.g. to the row ⇧F10 opened it from.
+  const [returnFocus] = useState(() => document.activeElement)
+  const onClose = () => {
+    if (returnFocus instanceof HTMLElement && returnFocus !== document.body) returnFocus.focus()
+    dismiss()
+  }
 
   // A zero-size virtual element pinned at the cursor for Base UI to anchor to.
   const anchor = useMemo(
     () => ({
-      getBoundingClientRect: () =>
-        ({
-          x,
-          y,
-          top: y,
-          left: x,
-          right: x,
-          bottom: y,
-          width: 0,
-          height: 0,
-          toJSON() {},
-        }) as DOMRect,
+      getBoundingClientRect: () => ({
+        x,
+        y,
+        top: y,
+        left: x,
+        right: x,
+        bottom: y,
+        width: 0,
+        height: 0,
+        toJSON() {},
+      }),
     }),
     [x, y],
   )
@@ -85,7 +92,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
         open
         title={confirmAction.label}
         description={confirmAction.confirm ?? ''}
-        confirmLabel={confirmAction.destructive ? 'Delete' : 'Confirm'}
+        confirmLabel={confirmAction.destructive ? t('Delete') : t('Confirm')}
         destructive={confirmAction.destructive}
         onConfirm={confirmAction.onSelect}
         onClose={onClose}
@@ -147,12 +154,12 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
           // `forwardRef` object — so `typeof === 'function'` misses it and would
           // render an empty span). Detect FA by its shape, treat everything else
           // as a renderable component.
-          let icon: React.ReactNode = undefined
+          let icon: React.ReactNode
 
           if (Icon && typeof Icon === 'object' && 'iconName' in Icon) {
             icon = <FontAwesomeIcon icon={Icon} className="h-3.5 w-3.5" />
           } else if (Icon) {
-            const LucideCmp = Icon as LucideIcon
+            const LucideCmp = Icon
 
             icon = <LucideCmp className="h-3.5 w-3.5" strokeWidth={1.8} />
           }

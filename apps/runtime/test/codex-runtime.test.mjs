@@ -66,6 +66,11 @@ test('Codex new/resume context keeps instructions, MCP, and shell credentials sc
   assert.equal(actorA.shell_environment_policy.set.OPENAB_ACP_AUTH_KEY, undefined)
   assert.equal(actorA.shell_environment_policy.inherit, 'none')
   assert.equal(actorA.mcp_servers.nuphos.tool_timeout_sec, 1800)
+  assert.deepEqual(actorA.plugins, {
+    _default: { enabled: true },
+    'browser@openai-bundled': { enabled: false },
+    'browser@openai-curated-remote': { enabled: false },
+  })
   assert.equal(actorB.shell_environment_policy.set.NUPHOS_TOKEN, 'actor-b')
   assert.equal(JSON.stringify(actorB).includes('actor-a'), false)
   assert.equal(config.shell_environment_policy, undefined)
@@ -74,6 +79,21 @@ test('Codex new/resume context keeps instructions, MCP, and shell credentials sc
     nuphosCodexSessionConfig(actorA, { 'ai.nuphos/codex': {} }).developer_instructions,
     '',
   )
+})
+
+test('Codex keeps an existing plugin default and still disables the Browser plugin', () => {
+  const { plugins } = nuphosCodexSessionConfig(
+    { plugins: { _default: { enabled: false }, 'sample@test': { enabled: true } } },
+    { 'ai.nuphos/codex': {} },
+    runtimeEnv,
+  )
+
+  assert.deepEqual(plugins, {
+    _default: { enabled: false },
+    'sample@test': { enabled: true },
+    'browser@openai-bundled': { enabled: false },
+    'browser@openai-curated-remote': { enabled: false },
+  })
 })
 
 test('Codex shell inherits only baseline variables and explicitly scoped credentials', () => {
@@ -128,7 +148,7 @@ test('Codex new/resume preserves managed memory budgets without trusting actor o
 
     assert.equal(env.GOMEMLIMIT, '6GiB')
     assert.equal(env.NODE_OPTIONS, '--max-old-space-size=6144')
-    // Fan-out caps and the guard that installs the hard RLIMIT_DATA ceiling
+    // Fan-out caps and the credential-refreshing guard
     // have to survive inherit: 'none' too, and an actor must not be able to
     // widen them or point BASH_ENV at a script of its own.
     assert.equal(env.GOFLAGS, '-p=2')

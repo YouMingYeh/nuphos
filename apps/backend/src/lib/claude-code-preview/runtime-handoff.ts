@@ -15,7 +15,13 @@ import { openConversationSession } from './open-conversation-session'
 import { resolveConversationChatRuntime } from './conversation-chat-route'
 import { previewSessionAccess } from './credentials-mcp'
 import { parseSessionExecutionState } from './runtime-execution-snapshot'
-import { RUNTIME_HANDOFFS_KEY as HANDOFFS_KEY } from './runtime-handoff-store'
+import {
+  RUNTIME_HANDOFFS_KEY as HANDOFFS_KEY,
+  advertiseRuntimeHandoffs,
+  runtimeHandoffField as field,
+  sessionHandoff,
+} from './runtime-handoff-store'
+import { isOnline } from './session-reattach'
 
 import type { RuntimeHandoff } from './runtime-handoff-store'
 import type { TeamPreviewClient } from './team-openab-runtime'
@@ -24,8 +30,6 @@ export type { RuntimeHandoff } from './runtime-handoff-store'
 
 /** The gateway ignores a resume while the old connection still owns the turn's output. */
 export const HANDOFF_SETTLE_MS = 1_000
-/** Past this the turn has long ended; nothing is left to pick up. */
-export const HANDOFF_TTL_MS = 30 * 60_000
 const ADOPT_INTERVAL_MS = 2_000
 const MAX_ADOPT_ATTEMPTS = 5
 /** Shutdown has seconds to spare; a runtime that cannot answer by then is not waited for. */
@@ -38,22 +42,22 @@ const RUNTIME_OWNED_PHASES = new Set([
 ])
 
 const queued: RuntimeHandoff[] = []
-const field = (handoff: Pick<RuntimeHandoff, 'teamId' | 'conversationId'>) =>
-  `${handoff.teamId}:${handoff.conversationId}`
 
 export function queueRuntimeHandoff(handoff: Omit<RuntimeHandoff, 'at'>): void {
   queued.push({ ...handoff, at: Date.now() })
 }
 
 /**
- * A session with no turn here can still have work the runtime owns: a
- * background task whose completion it continues on its own, or that
- * continuation already running. Its output goes to the connection that last
- * resumed the session, so once this replica exits the runtime parks it as
+ * A session with no user turn here can still have work the runtime owns: a
+ * turn the runtime started itself (a wakeup or a background-task
+ * continuation) whose output this replica carries, or a background task whose
+ * completion it continues on its own. Its output goes to the connection that
+ * last resumed the session, so once this replica exits the runtime parks it as
  * "output connection lost" until something resumes the session again. Hand
  * those on as well; an idle session needs nobody. A user turn is never picked
  * here: it may be running on another replica, and only the turn route knows it
- * runs on this one.
+ * runs on this one. A runtime-started turn has no route, but this replica
+ * knows it carries one: its transcript is open here.
  */
 async function queueRuntimeOwnedWork(): Promise<void> {
   const handedOff = new Set(queued.map(field))
@@ -62,24 +66,18 @@ async function queueRuntimeOwnedWork(): Promise<void> {
     [...sessionsByConversation.values()]
       .filter((session) => !handedOff.has(field(session)))
       .map(async (session) => {
-        const state = await Promise.race([
-          session.client
-            .getSessionExecutionState(session.openabSessionId)
-            .then(parseSessionExecutionState)
-            .catch(() => null),
-          Bun.sleep(RUNTIME_STATE_PROBE_MS).then(() => null),
-        ])
+        if (!session.autonomousTranscriptOpen) {
+          const state = await Promise.race([
+            session.client
+              .getSessionExecutionState(session.openabSessionId)
+              .then(parseSessionExecutionState)
+              .catch(() => null),
+            Bun.sleep(RUNTIME_STATE_PROBE_MS).then(() => null),
+          ])
 
-        if (!RUNTIME_OWNED_PHASES.has(state?.phase ?? '')) return
-        queueRuntimeHandoff({
-          teamId: session.teamId,
-          conversationId: session.conversationId,
-          ownerUserId: session.conversationOwnerUserId ?? session.userId,
-          actorUserId: session.userId,
-          locale: session.locale,
-          // Only a teammate's own turn acts as someone other than the owner.
-          humanTurn: Boolean(session.runtime?.env?.NUPHOS_SESSION_ACTOR),
-        })
+          if (!RUNTIME_OWNED_PHASES.has(state?.phase ?? '')) return
+        }
+        queueRuntimeHandoff(sessionHandoff(session))
       }),
   )
 }
@@ -103,13 +101,7 @@ export async function publishRuntimeHandoffs(): Promise<number> {
   }
   for (const client of clients) client.close()
   if (handoffs.length === 0) return 0
-  await withRedis((redis) =>
-    redis.hset(
-      HANDOFFS_KEY,
-      Object.fromEntries(handoffs.map((handoff) => [field(handoff), JSON.stringify(handoff)])),
-    ),
-  )
-  logEvent('info', 'agent.runtime_handoff.published', { count: handoffs.length })
+  await advertiseRuntimeHandoffs(handoffs)
 
   return handoffs.length
 }
@@ -140,6 +132,9 @@ export async function claimRuntimeHandoffs(now = Date.now()): Promise<RuntimeHan
     const handoff = parse(raw)
 
     if (handoff && now - handoff.at < HANDOFF_SETTLE_MS) continue
+    // An offline computer is waited for, not tried: the handoff stays as it is,
+    // spends no attempt and logs nothing, and is adopted once the computer is back.
+    if (typeof handoff?.runtimeUrl === 'string' && !(await isOnline(handoff.runtimeUrl))) continue
     const removed = await withRedis((redis) =>
       redis.eval(
         `if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
@@ -153,7 +148,7 @@ export async function claimRuntimeHandoffs(now = Date.now()): Promise<RuntimeHan
       ),
     )
 
-    if (removed === 1 && handoff && now - handoff.at < HANDOFF_TTL_MS) claimed.push(handoff)
+    if (removed === 1 && handoff) claimed.push(handoff)
   }
 
   return claimed

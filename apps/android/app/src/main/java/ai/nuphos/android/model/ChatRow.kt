@@ -7,14 +7,16 @@ sealed class ChatRow {
     abstract val id: String
 
     data class Timestamp(override val id: String, val date: Instant) : ChatRow()
-    data class User(override val id: String, val messageId: String, val text: String, val images: List<String>, val uploads: List<TransferUpload> = emptyList()) : ChatRow()
+    data class User(override val id: String, val messageId: String, val text: String, val images: List<String>, val uploads: List<TransferUpload> = emptyList(), val sender: MessageAttribution? = null) : ChatRow()
+    data class Event(override val id: String, val content: User) : ChatRow()
     data class AssistantText(override val id: String, val messageId: String, val text: String, val streaming: Boolean) : ChatRow()
     data class Reasoning(override val id: String, val part: ChatPart.Reasoning) : ChatRow()
     data class Tool(override val id: String, val messageId: String, val part: ChatPart.Tool, val canDecide: Boolean) : ChatRow()
     data class Work(override val id: String, val rows: List<ChatRow>, val duration: Double?) : ChatRow()
+    data class Downloads(override val id: String, val group: ai.nuphos.android.data.TransferDownloadGroup) : ChatRow()
     data class Memory(override val id: String, val created: Int, val updated: Int) : ChatRow()
     data class MemoryRecall(override val id: String, val entries: List<MemoryEntry>, val fetched: Int) : ChatRow()
-    data class Activity(val text: String?) : ChatRow() {
+    data class Activity(val text: String?, val live: Boolean = true) : ChatRow() {
         override val id = "activity"
     }
     data class Hint(override val id: String, val text: String, val isError: Boolean) : ChatRow()
@@ -33,6 +35,9 @@ sealed class ChatRow {
             phaseLabel = session.phaseLabel,
             error = session.error,
             stoppedByUser = session.stoppedByUser,
+            downloads = if (session.canReadDownloads) session.downloads else emptyList(),
+            timeline = session.timelineEvents,
+            hasEarlier = session.baseIndex > 0,
         )
 
         internal fun rows(
@@ -41,14 +46,24 @@ sealed class ChatRow {
             phaseLabel: String? = null,
             error: String? = null,
             stoppedByUser: Boolean = false,
+            downloads: List<ai.nuphos.android.data.TransferDownloadGroup> = emptyList(),
+            timeline: List<AgentConversationDetail.TimelineEvent> = emptyList(),
+            hasEarlier: Boolean = false,
         ): List<ChatRow> {
             val rows = mutableListOf<ChatRow>()
+            val anchoredDownloads = AgentDownloads.anchor(downloads, messages)
+            val events = timeline.distinctBy { it.at to it.text }.sortedBy { it.at }.groupBy { event ->
+                messages.indexOfFirst { it.createdAt?.isAfter(event.at) == true }
+            }
+            fun eventRows(index: Int) = events[index].orEmpty().map { Hint("event.${it.at}.${it.text}", it.text, false) }
             val lastApprovalCallId = lastPendingApproval(messages)
             for ((index, message) in messages.withIndex()) {
+                if (index > 0 || !hasEarlier) rows += eventRows(index)
                 val previous = messages.getOrNull(index - 1)?.createdAt
                 when (message.role) {
                     ChatMessage.Role.User -> {
-                        if (ChatTime.showsTimestamp(message.createdAt, previous) && message.createdAt != null) {
+                        val sender = MessageAttribution.parse(message.metadata)
+                        if (sender?.isEvent != true && ChatTime.showsTimestamp(message.createdAt, previous) && message.createdAt != null) {
                             rows += Timestamp("time.${message.id}", message.createdAt)
                         }
                         val display = TransferUpload.display(message.parts)
@@ -57,20 +72,25 @@ sealed class ChatRow {
                             (part as? ChatPart.File)?.takeIf { it.mediaType.startsWith("image/") }?.url
                         }
                         if (text.isNotEmpty() || images.isNotEmpty() || display.uploads.isNotEmpty()) {
-                            rows += User("user.${message.id}", message.id, text, images, display.uploads)
+                            val user = User("user.${message.id}", message.id, text, images, display.uploads, sender)
+                            rows += if (sender?.isEvent == true) Event("event.${message.id}", user) else user
                         }
                     }
                     ChatMessage.Role.Assistant -> {
                         val isLive = isStreaming && index == messages.lastIndex
                         rows += assistantRows(message, isLive, lastApprovalCallId)
-                        if (message.stoppedByUser == true && index == messages.lastIndex && !isStreaming) {
-                            rows += Hint("stopped.${message.id}", "Stopped.", false)
+                        rows += anchoredDownloads[message.id].orEmpty().map { Downloads("downloads.${it.groupId}", it) }
+                        if (message.stoppedByUser == true && !isLive) {
+                            val calls = message.parts.count { it is ChatPart.Tool }
+                            val suffix = when (calls) { 0 -> ""; 1 -> " · 1 call"; else -> " · $calls calls" }
+                            rows += Hint("stopped.${message.id}", "Stopped by you$suffix", false)
                         }
                     }
                     ChatMessage.Role.System -> Unit
                 }
             }
-            if (isStreaming) rows += Activity(phaseLabel)
+            rows += eventRows(-1)
+            if (isStreaming || !phaseLabel.isNullOrBlank()) rows += Activity(phaseLabel, live = isStreaming)
             error?.takeIf { !stoppedByUser }?.let { rows += Hint("error", it, true) }
             rows += Bottom
             return rows
@@ -111,21 +131,25 @@ sealed class ChatRow {
                     }
                     is ChatPart.Other if part.value["type"]?.stringValue == "memory-ingest" -> {
                         val v = part.value
-                        body += Memory(
-                            "memory.${v["eventId"]?.stringValue ?: pi}",
-                            v["memoriesCreated"]?.numberValue?.toInt() ?: 0,
-                            v["memoriesUpdated"]?.numberValue?.toInt() ?: 0,
-                        )
+                        val created = v["memoriesCreated"]?.numberValue?.toInt() ?: 0
+                        val updated = v["memoriesUpdated"]?.numberValue?.toInt() ?: 0
+                        if (created > 0 || updated > 0) {
+                            body += Memory("memory.${message.id}.${v["eventId"]?.stringValue ?: pi}", created, updated)
+                        }
                     }
                     else -> Unit
                 }
             }
-            if (live) return body
+            if (live) {
+                while (body.lastOrNull() is Reasoning) body.removeAt(body.lastIndex)
+                return body
+            }
             val lastText = body.indexOfLast { it is AssistantText }
             if (lastText < 0) return body
             fun foldable(row: ChatRow) = when (row) {
                 is Reasoning -> true
-                is Tool -> row.part.kind != ChatPart.Tool.Kind.Plan && row.part.kind != ChatPart.Tool.Kind.Question && row.part.state != ChatPart.Tool.State.ApprovalRequested
+                is Tool -> row.part.kind != ChatPart.Tool.Kind.Plan && row.part.kind != ChatPart.Tool.Kind.Question &&
+                    row.part.state != ChatPart.Tool.State.ApprovalRequested && ThreadReference.from(row.part) == null
                 else -> false
             }
             val intermediate = body.take(lastText).filter(::foldable)

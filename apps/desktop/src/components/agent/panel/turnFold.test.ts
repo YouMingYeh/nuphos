@@ -71,3 +71,11 @@ test('a cleanly finished turn still folds at its final answer', () => {
 
   assert.equal(turnFoldSplitIndex(parts, { streaming: false }), 2)
 })
+
+test('failed calls fold like any finished call', () => {
+  for (const failed of [tool('output-error'), { ...tool(), output: { exitCode: 2 } } as Part]) {
+    assert.equal(turnFoldSplitIndex([failed, tool(), text('Done.')], { streaming: false }), 2)
+    assert.equal(turnFoldSplitIndex([failed, interrupted('error')], { streaming: false }), 1)
+    assert.equal(turnFoldSplitIndex([failed], { streaming: false, endedWithoutAnswer: true }), 1)
+  }
+})

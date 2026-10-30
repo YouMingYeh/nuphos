@@ -45,6 +45,19 @@ object AgentChatApi {
             .build()
     }
 
+    /**
+     * Sends one message from outside the chat screen: a notification reply. The
+     * server reads the history itself, queues behind a running turn, and keeps
+     * the turn going after this returns, so only the headers are awaited.
+     */
+    fun reply(token: String, teamId: String, sessionId: String, text: String): Boolean {
+        val body = ChatRequest(
+            id = sessionId, teamId = teamId, messages = listOf(ChatMessage.user(text)),
+            streamId = java.util.UUID.randomUUID().toString(),
+        )
+        return Http.client.newCall(chatRequest(token, body)).execute().use { it.isSuccessful }
+    }
+
     @Serializable
     private data class ChatRequestBody(
         val id: String,
@@ -216,7 +229,7 @@ object AgentChatApi {
 
     sealed class Conflict : Exception() {
         data class TranscriptOutOfSync(val storedMessageCount: Int?) : Conflict() {
-            override val message = "The conversation changed elsewhere; resyncing."
+            override val message = "The agent changed elsewhere; resyncing."
         }
         data object StreamNotResumable : Conflict() {
             private fun readResolve(): Any = StreamNotResumable
@@ -224,11 +237,11 @@ object AgentChatApi {
         }
         data object StreamConflict : Conflict() {
             private fun readResolve(): Any = StreamConflict
-            override val message = "That stream belongs to another conversation."
+            override val message = "That stream belongs to another agent."
         }
         data object ConversationBusy : Conflict() {
             private fun readResolve(): Any = ConversationBusy
-            override val message = "This conversation is busy with another reply."
+            override val message = "This agent is busy with another reply."
         }
         data class Other(val code: String?, val serverMessage: String, val status: Int) : Conflict() {
             override val message = serverMessage

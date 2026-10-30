@@ -1,13 +1,20 @@
+import { t } from '../../i18n/index.ts'
+
 import type { BoxUsage } from '../../api/device-types'
 
-/** The name the backend gives an unnamed Box: "Box N", after the highest the caller has. */
+/** What New computer says it makes. */
+export const NEW_BOX_DESCRIPTION = t(
+  "A Linux machine in the cloud with Claude Code and Codex on it. Running computers count against your plan's vCPU; paused ones do not.",
+)
+
+/** The name the backend gives an unnamed Box: "Computer N", after the highest the caller has. */
 export function nextBoxName(labels: string[]): string {
   const taken = labels
-    .map((label) => /^Box (\d+)$/u.exec(label)?.[1])
+    .map((label) => /^Computer (\d+)$/u.exec(label)?.[1])
     .filter((n): n is string => n !== undefined)
     .map(Number)
 
-  return `Box ${String(Math.max(0, ...taken) + 1)}`
+  return `Computer ${String(Math.max(0, ...taken) + 1)}`
 }
 
 /**
@@ -37,4 +44,26 @@ export function quotaCells(limit: number, used: number, adding: number): QuotaCe
 
     return 'free'
   })
+}
+
+/** The size to make: the pick while it fits, else the smallest that does, else the smallest, where the backend then offers the plans. */
+export function boxCreateSize(
+  choices: { vcpus: number }[],
+  picked: number | undefined,
+  left: number | null,
+): number | undefined {
+  const fits = (size: number) => left === null || size <= left
+
+  return (
+    choices.find((choice) => choice.vcpus === picked && fits(choice.vcpus)) ??
+    choices.find((choice) => fits(choice.vcpus)) ??
+    choices.at(0)
+  )?.vcpus
+}
+
+/** Columns for `count` size cards: one each up to three, then wrapping; one while there are none. */
+export function sizeGridColumns(count: number): 1 | 2 | 3 {
+  if (count <= 1) return 1
+
+  return count === 2 ? 2 : 3
 }

@@ -1,3 +1,4 @@
+import { t } from '../../i18n/index.ts'
 import { AGENT_PROVIDER } from '../../types/runtime.ts'
 
 import { agentName } from './agentPresentation.ts'
@@ -24,13 +25,13 @@ export const BOX_SETUP_TIMEOUT_MS = 5 * 60_000
 export type MachineState = BoxState | 'stopped' | 'hostOffline'
 
 export const BOX_BADGE: Record<MachineState, RuntimeStatusView> = {
-  creating: { label: 'Starting', tone: 'pending' },
-  connecting: { label: 'Connecting', tone: 'pending' },
-  running: { label: 'Running', tone: 'online' },
-  hostOffline: { label: 'Host offline', tone: 'pending' },
-  paused: { label: 'Paused', tone: 'off' },
-  stopped: { label: 'Offline', tone: 'off' },
-  error: { label: "Didn't start", tone: 'error' },
+  creating: { label: t('Starting'), tone: 'pending' },
+  connecting: { label: t('Connecting'), tone: 'pending' },
+  running: { label: t('Running'), tone: 'online' },
+  hostOffline: { label: t('Host offline'), tone: 'pending' },
+  paused: { label: t('Paused'), tone: 'off' },
+  stopped: { label: t('Offline'), tone: 'off' },
+  error: { label: t("Didn't start"), tone: 'error' },
 }
 
 /** A member who may only use a machine sees it, not the controls the backend would refuse. */
@@ -39,7 +40,7 @@ export function canManage(device: AgentDevice): boolean {
 }
 
 /** Shown when the backend gives no reason, e.g. an older backend without the route. */
-const REMOVE_FALLBACK = 'Could not remove it. Update Nuphos and try again.'
+const REMOVE_FALLBACK = t('Could not remove it. Update Nuphos and try again.')
 
 /**
  * How a machine leaves the list: a Box is deleted, any time; a computer is only forgotten once
@@ -49,22 +50,26 @@ export function removal(device: AgentDevice) {
   if (device.box)
     return {
       allowed: true,
-      action: 'Delete',
-      confirm: 'Delete Box',
-      error: 'Could not delete Box',
+      title: t('Delete {name}?', { name: device.label }),
+      action: t('Delete'),
+      confirm: t('Delete computer'),
+      error: t('Could not delete computer'),
       fallback: REMOVE_FALLBACK,
-      description:
-        "This permanently deletes the Box, its files and its agents' sign-ins, and stops conversations running on it. Your conversation history stays in Nuphos.",
+      description: t(
+        "This permanently deletes the computer, its files and its runtimes' sign-ins, and stops agents running on it. Your agent history stays in Nuphos.",
+      ),
     }
 
   return {
     allowed: !device.online,
-    action: 'Remove computer',
-    confirm: 'Remove computer',
-    error: 'Could not remove computer',
+    title: t('Remove {name}?', { name: device.label }),
+    action: t('Remove computer'),
+    confirm: t('Remove computer'),
+    error: t('Could not remove computer'),
     fallback: REMOVE_FALLBACK,
-    description:
-      'This removes the computer and its agents from Nuphos. Opening Nuphos on it registers it again. Your conversation history stays in Nuphos.',
+    description: t(
+      'This removes the computer and its runtimes from Nuphos. Opening Nuphos on it registers it again. Your agent history stays in Nuphos.',
+    ),
   }
 }
 
@@ -143,9 +148,10 @@ export function accessHint(device: AgentDevice): string | null {
   const access = device.box?.access
 
   if (!access || !canManage(device)) return null
-  if (access.everyone) return 'Everyone'
+  if (access.everyone) return t('Everyone')
+  if (!access.userIds.length) return t('Admins only')
 
-  return access.userIds.length ? `Shared with ${String(access.userIds.length)}` : 'Admins only'
+  return t('Shared with {n}', { n: access.userIds.length })
 }
 
 /** Boxes that were creating and are gone: #355 drops a Box whose machine could not be made. */
@@ -216,9 +222,11 @@ export function boxSetupPhase(
 /** Why a setup flow's Box did not come up, or null while it still may. */
 export function boxSetupProblem(phase: BoxSetupPhase): string | null {
   if (phase === 'error')
-    return 'The Box could not start. Delete it in Settings › Agents and try again.'
+    return t('The computer could not start. Delete it in Settings › Runtimes and try again.')
   if (phase === 'timeout')
-    return 'The Box has not started after 5 minutes. Delete it in Settings › Agents and try again.'
+    return t(
+      'The computer has not started after 5 minutes. Delete it in Settings › Runtimes and try again.',
+    )
 
   return null
 }
@@ -229,23 +237,29 @@ export const BOX_PLANS = [
     name: 'Starter',
     vcpus: 4,
     usdPerMonth: 20,
-    example: 'e.g. one 4 vCPU Box, or two 2 vCPU Boxes',
-    perks: ['Your agents keep working while your laptop sleeps', 'A full desktop in every Box'],
+    example: t('e.g. one 4 vCPU computer'),
+    perks: [
+      t('Your agents keep working while your laptop sleeps'),
+      t('A full desktop in every computer'),
+    ],
   },
   {
     name: 'Pro',
     vcpus: 12,
     usdPerMonth: 50,
     recommended: true,
-    example: 'e.g. an 8 vCPU build Box next to two 2 vCPU Boxes',
-    perks: ['Room for a build Box beside everyday ones', 'Share Boxes with your teammates'],
+    example: t('e.g. an 8 vCPU build computer next to a 4 vCPU computer'),
+    perks: [
+      t('Room for a build computer beside everyday ones'),
+      t('Share computers with your teammates'),
+    ],
   },
   {
     name: 'Scale',
     vcpus: 24,
     usdPerMonth: 100,
-    example: 'e.g. three 8 vCPU build Boxes at once',
-    perks: ['Many agents working in parallel', 'Boxes for the whole team at once'],
+    example: t('e.g. three 8 vCPU build computers at once'),
+    perks: [t('Many agents working in parallel'), t('Computers for the whole team at once')],
   },
 ]
 
@@ -258,28 +272,29 @@ export function boxSessions(memMiB: number): number {
   return Math.max(1, Math.floor((memMiB - 2048) / 1792))
 }
 
+// By vCPU, so a name says what the size is whatever sizes the provider offers.
 const SIZE_TIERS = [
-  { name: 'Small', use: 'Light tasks' },
-  { name: 'Medium', use: 'Everyday work' },
-  { name: 'Large', use: 'Heavy builds' },
+  { upTo: 2, name: t('Small'), use: t('Light tasks') },
+  { upTo: 6, name: t('Medium'), use: t('Everyday work') },
+  { upTo: Infinity, name: t('Large'), use: t('Heavy builds') },
 ]
 
-const sessionCount = (n: number) => `${String(n)} session${n === 1 ? '' : 's'}`
+const sessionCount = (n: number) =>
+  n === 1 ? t('Up to 1 agent at once') : t('Up to {n} agents at once', { n })
 
-/** The sizes instabox offers, named by rank: the smallest is Small, the biggest Large. */
+/** The sizes instabox offers, named by vCPU: up to 2 Small, up to 6 Medium, more Large. */
 export function boxSizeChoices(sizes: { vcpus: number; memMiB: number }[]) {
-  return sizes.map(({ vcpus, memMiB }, index) => {
-    // 0 for the first, 2 for the last, 1 between.
-    const rank = index === 0 ? 0 : 2 - Number(index < sizes.length - 1)
-    const tier = SIZE_TIERS[rank]
+  return sizes.map(({ vcpus, memMiB }) => {
+    // 0 Small, 1 Medium, 2 Large; also how many slabs its glyph fills, less one.
+    const tier = SIZE_TIERS.findIndex((size) => vcpus <= size.upTo)
 
     return {
       vcpus,
-      rank,
-      name: tier.name,
+      tier,
+      name: SIZE_TIERS[tier].name,
       spec: `${String(vcpus)} vCPU · ${String(memMiB / 1024)} GiB`,
-      use: tier.use,
-      sessions: `Up to ${sessionCount(boxSessions(memMiB))} at once`,
+      use: SIZE_TIERS[tier].use,
+      sessions: sessionCount(boxSessions(memMiB)),
     }
   })
 }

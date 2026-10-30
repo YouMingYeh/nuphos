@@ -24,10 +24,7 @@ const USER: UserInfo = {
 
 const b64url = (value: string) => Buffer.from(value, 'utf8').toString('base64url')
 const encodeUser = (user: unknown) => b64url(JSON.stringify(user))
-const tokenFor = (sub: string) =>
-  `${b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))}.${b64url(JSON.stringify({ aud: 'nuphos', sub }))}.sig`
-
-const TOKEN = tokenFor(USER.id)
+const TOKEN = 'nus_test-session'
 const HANDLE = 'h'.repeat(43)
 /** What the landing page puts on the loopback redirect after a real sign-in. */
 const DELIVERY_CODE = 'd'.repeat(43)
@@ -46,16 +43,14 @@ let registrations: Registration[] = []
 
 // Per-test switches for the fake servers.
 let nativeSupported = true
-/** How the fake landing page answers GET /api/google/start. */
-let landingStart: () => Response = () =>
+/** How the backend answers the provider chooser probe. */
+let chooserProbe: () => Response = () =>
   new Response('provider chooser', { headers: { 'X-Nuphos-Social-Login': '1' } })
 let redeemQueue: (() => Response)[] = []
 let redeemCalls = 0
 /** Bodies POSTed to /auth/native/session/redeem, so tests can assert on them. */
 let redeemBodies: { handle: string; codeVerifier: string; code?: string }[] = []
-let meHandler: () => Promise<Response> = () => {
-  throw new Error('unexpected /auth/me call')
-}
+let meHandler: () => Promise<Response> = async () => json(USER)
 
 let auth: typeof import('./auth.ts')
 const realFetch = globalThis.fetch
@@ -63,6 +58,10 @@ const realFetch = globalThis.fetch
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
+/** DELETE /auth/sessions/current calls, so sign-out can be asserted on. */
+const sessionEnds: { method?: string; authorization: string | null }[] = []
+/** x-atlas-client sent with each sign-in code request. */
+const codeRequestClients: (string | null)[] = []
 const readySession = () => json({ token: TOKEN, user: USER })
 const pendingSession = () =>
   json({ error: { code: 'authorization_pending', message: 'not yet' } }, 409)
@@ -70,6 +69,7 @@ const pendingSession = () =>
 before(async () => {
   mock.module('electron', {
     namedExports: {
+      app: { getVersion: () => '0.0.0-test' },
       shell: {
         openExternal: async (url: string) => {
           openedUrls.push(url)
@@ -101,7 +101,7 @@ before(async () => {
     // Loopback requests are real — that listener is the thing under test.
     if (url.includes('127.0.0.1') || url.includes('localhost:')) return realFetch(input, init)
 
-    if (url.includes('/auth/social/login')) return landingStart()
+    if (url.includes('/auth/social/login')) return chooserProbe()
 
     if (url.endsWith('/auth/native/session')) {
       if (!nativeSupported)
@@ -122,6 +122,21 @@ before(async () => {
 
     if (url.includes('/auth/me')) return meHandler()
 
+    if (url.endsWith('/auth/email/request-code')) {
+      codeRequestClients.push(new Headers(init?.headers).get('x-atlas-client'))
+
+      return json({ ok: true })
+    }
+
+    if (url.endsWith('/auth/sessions/current')) {
+      sessionEnds.push({
+        method: init?.method,
+        authorization: new Headers(init?.headers).get('authorization'),
+      })
+
+      return new Response(null, { status: 204 })
+    }
+
     throw new Error(`unexpected fetch: ${url}`)
   }) as typeof fetch
 
@@ -133,14 +148,12 @@ beforeEach(() => {
   configWrites.length = 0
   registrations = []
   nativeSupported = true
-  landingStart = () =>
+  chooserProbe = () =>
     new Response('provider chooser', { headers: { 'X-Nuphos-Social-Login': '1' } })
   redeemQueue = [readySession]
   redeemCalls = 0
   redeemBodies = []
-  meHandler = () => {
-    throw new Error('unexpected /auth/me call')
-  }
+  meHandler = async () => json(USER)
 })
 
 after(() => {
@@ -448,7 +461,69 @@ test('falls back to the legacy flow when the backend has no native endpoint', as
   assert.equal(lastConfig().token, TOKEN)
 })
 
-test('legacy: falls back to /auth/me when no user is forwarded', async () => {
+test('falls back to the legacy flow when the backend has no chooser endpoint', async () => {
+  chooserProbe = () => new Response('Not found', { status: 404 })
+
+  const loginPromise = auth.login()
+
+  loginPromise.catch(() => undefined)
+  const opened = await waitForBrowser()
+
+  assert.equal(opened.pathname, '/login')
+  assert.equal(redeemCalls, 0, 'must not poll a flow the landing page cannot start')
+  assert.equal(registrations.length, 0, 'a legacy fallback must not orphan a registration')
+
+  const state = legacyState(opened)
+
+  await hitCallback(new URL(state.callbackUrl).port, {
+    token: TOKEN,
+    state: state.clientState,
+    user: encodeUser(USER),
+  })
+  assert.deepEqual(await loginPromise, USER)
+})
+
+test('falls back to the legacy flow when the backend redirects the chooser probe', async () => {
+  // A redirect without the chooser's support header must not select native login.
+  chooserProbe = () =>
+    new Response(null, {
+      status: 301,
+      headers: { location: 'https://api.nuphos.ai/auth/social/login' },
+    })
+
+  const loginPromise = auth.login()
+
+  loginPromise.catch(() => undefined)
+  const opened = await waitForBrowser()
+
+  assert.equal(opened.pathname, '/login', 'a bare redirect is not evidence the endpoint exists')
+
+  const state = legacyState(opened)
+
+  await hitCallback(new URL(state.callbackUrl).port, {
+    token: TOKEN,
+    state: state.clientState,
+    user: encodeUser(USER),
+  })
+  assert.deepEqual(await loginPromise, USER)
+})
+
+test('the probe never spends the real handle', async () => {
+  // It runs before registration, so it has none to spend — and the handle that
+  // does get registered is the one the browser is sent with.
+  const loginPromise = auth.login()
+
+  loginPromise.catch(() => undefined)
+  const opened = await waitForBrowser()
+
+  assert.equal(registrations.length, 1)
+  assert.equal(opened.searchParams.get('handle'), HANDLE)
+
+  await hitCallback(registeredPort(), { state: registrations[0]!.clientState, code: DELIVERY_CODE })
+  await loginPromise
+})
+
+test('legacy: the user comes from /auth/me, not the callback', async () => {
   nativeSupported = false
   let meCalls = 0
 
@@ -463,7 +538,12 @@ test('legacy: falls back to /auth/me when no user is forwarded', async () => {
   loginPromise.catch(() => {})
   const state = legacyState(await waitForBrowser())
 
-  await hitCallback(new URL(state.callbackUrl).port, { token: TOKEN, state: state.clientState })
+  // A forwarded identity is ignored: only the backend can say whose token it is.
+  await hitCallback(new URL(state.callbackUrl).port, {
+    token: TOKEN,
+    state: state.clientState,
+    user: encodeUser({ ...USER, id: '507f1f77bcf86cd799439099' }),
+  })
 
   assert.deepEqual(await loginPromise, USER)
   assert.equal(meCalls, 1)
@@ -490,19 +570,23 @@ test('legacy: a failed /auth/me never renders the success page', async () => {
   assert.equal(configWrites.length, 0)
 })
 
-test('falls back when the backend has no provider chooser', async () => {
-  landingStart = () => new Response('not found', { status: 404 })
-  const result = auth.login()
-  const opened = await waitForBrowser()
+test('signing out ends the session on the server', async () => {
+  const loginPromise = auth.login()
 
-  assert.equal(opened.pathname, '/login')
-  assert.equal(registrations.length, 0)
-  const state = legacyState(opened)
+  await waitForBrowser()
+  await hitCallback(registeredPort(), { state: registrations[0]!.clientState, code: DELIVERY_CODE })
+  await loginPromise
+  sessionEnds.length = 0
 
-  await hitCallback(new URL(state.callbackUrl).port, {
-    token: TOKEN,
-    state: state.clientState,
-    user: encodeUser(USER),
-  })
-  await result
+  await auth.logout()
+
+  assert.deepEqual(sessionEnds, [{ method: 'DELETE', authorization: `Bearer ${TOKEN}` }])
+  assert.deepEqual(lastConfig(), {})
+})
+
+test('asking for a sign-in code names the app, so the email can say so', async () => {
+  codeRequestClients.length = 0
+  await auth.requestEmailCode('dev@example.com')
+
+  assert.deepEqual(codeRequestClients, ['nuphos-desktop/0.0.0-test'])
 })

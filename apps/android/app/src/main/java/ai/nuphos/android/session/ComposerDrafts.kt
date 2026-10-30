@@ -28,6 +28,9 @@ class ComposerDrafts(private val persistence: Persistence? = null) {
             if (id != null) texts.putAll(persistence?.load(id).orEmpty().filterKeys { it.accountId == id })
         }
     }
+    /** Disk preferences were already erased on IO; retire any earlier in-memory restore on Main too. */
+    @Synchronized fun eraseMemory(keys: Set<Key>) { keys.forEach(texts::remove) }
+
     @Synchronized fun clear() {
         generation++
         persistence?.clear()
@@ -41,7 +44,7 @@ class ComposerDrafts(private val persistence: Persistence? = null) {
         return Lease(Key(accountId, teamId, destination), generation, allowed)
     }
 
-    inner class Lease internal constructor(private val key: Key, private val epoch: Long, private val allowed: () -> Boolean) {
+    inner class Lease internal constructor(val key: Key, private val epoch: Long, private val allowed: () -> Boolean) {
         val text: String get() = synchronized(this@ComposerDrafts) { if (valid()) texts[key].orEmpty() else "" }
         private fun valid() = epoch == generation && key.accountId == accountId && allowed()
         fun write(text: String): Boolean = synchronized(this@ComposerDrafts) {

@@ -7,6 +7,8 @@
 // posthog-js and `import.meta.env`. Under-redacting is a privacy bug, so the
 // patterns are exercised directly in reportRedaction.test.ts.
 
+import { sourceText } from '../i18n/index.ts'
+
 /** Upper bound on reported text, applied after redaction. */
 export const MAX_REPORT_TEXT_LENGTH = 500
 
@@ -91,7 +93,9 @@ function redactSecretAssignments(value: string): string {
 export function sanitizeReportText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
 
-  const specificallyRedacted = value
+  // Report the English key, not the user's translation, so one failure stays
+  // one group in every locale.
+  const specificallyRedacted = sourceText(value)
     .replace(PRIVATE_KEY, '[redacted_private_key]')
     .replace(CONNECTION_CREDENTIALS, '$1[redacted_credentials]@')
     .replace(/\bAuthorization\s*[:=]\s*[^\r\n,;]{1,4096}/gi, 'Authorization: [redacted]')
@@ -102,7 +106,10 @@ export function sanitizeReportText(value: unknown): string | undefined {
       /\beyJ[A-Za-z0-9_-]{5,2048}\.[A-Za-z0-9_-]{1,4096}\.[A-Za-z0-9_-]{1,4096}\b/g,
       '[redacted_jwt]',
     )
-    .replace(/\b(?:sk|phc|ghp|gho|glpat|xox[a-z])[-_][A-Za-z0-9_-]{8,}\b/g, '[redacted_key]')
+    .replace(
+      /\b(?:sk|phc|ghp|gho|glpat|xox[a-z]|nup|nus)[-_][A-Za-z0-9_-]{8,}\b/g,
+      '[redacted_key]',
+    )
 
   return redactSecretAssignments(specificallyRedacted)
     .replace(EMAIL, '[redacted_email]')

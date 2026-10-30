@@ -25,13 +25,14 @@ It also checks a locally updated asynchronous card: its measured height must
 match the allocated cell height, and the following message must sit below it.
 Step expansion is sampled for title drift, and new sends must install their
 short presentation-only arrival animation without changing the scroll geometry.
+Finally it rotates to landscape and back; on every frame no row may be
+animating, since an animated rotation draws rows over each other.
 Relaunch without `-scroll-regression` to return to the signed-in app.
 
 The iOS transcript uses ChatLayout 2.5.2 and self-sizing UIKit cells hosting
 SwiftUI rows. The controller owns reading position, applies changed rows only,
 and treats `lastSubmittedRowID` as explicit local-send intent. Server updates
-preserve the visible row; sends extend the layout to place the new question near
-the top. Dragging takes over from automatic following. Markdown must be populated
+preserve the visible row; sends return to the end, above the composer. Dragging takes over from automatic following. Markdown must be populated
 before a fresh cell is measured. The existing SwiftUI transcript remains the
 fallback on other platforms.
 
@@ -48,8 +49,8 @@ xcrun devicectl device process launch --device <udid> ai.nuphos.ios
 
 `.github/workflows/release-ios.yml` archives, signs with the team's App Store
 Connect API key (cloud-managed distribution certificate) and uploads to
-TestFlight. It runs when the version in `apps/ios/package.json` changes on
-`main`, or from the Actions tab. The build number is the workflow run number;
+TestFlight. Dispatch it from `main` with an `ios-vX.Y.Z` tag that matches
+`apps/ios/package.json` (see `docs/releases.md`). The build number is the workflow run number;
 `MARKETING_VERSION` in the
 project only matters for local builds.
 

@@ -6,6 +6,7 @@ import {
   agentOffline,
   agentRunsOn,
   localRemovalId,
+  thisComputerSignIn,
   visibleAgent,
 } from './agentPresentation.ts'
 import { boxAgents } from './boxPresentation.ts'
@@ -75,6 +76,19 @@ test('Box cards and usage share signed-in local agents, retaining every team run
   )
   assert.equal(visible.find((agent) => agent.id === 'box2-codex')?.id, 'box2-codex')
   assert.equal(catalog.length, 10, 'presentation never removes catalog / history data')
+})
+
+test('an agent signed in before stays when it signs out; one never signed in stays hidden', () => {
+  const box = (signedIn: boolean | null, everSignedIn?: true) =>
+    ({
+      ...local('a', '2', signedIn),
+      local: { ...local('a', '2', signedIn).local!, ...(everSignedIn ? { everSignedIn } : {}) },
+    }) as RuntimeInstance
+
+  assert.equal(visibleAgent(box(false, true)), true)
+  assert.equal(visibleAgent(box(null, true)), true)
+  assert.equal(visibleAgent(box(false)), false)
+  assert.equal(visibleAgent(box(null)), false)
 })
 
 test('Runs on uses the actual current device, labels remote Boxes, and handles missing identity', () => {
@@ -170,4 +184,25 @@ test("a computer's agent goes by the name given to it, else its provider's", () 
 
   assert.equal(agentName(agent), 'Codex')
   assert.equal(agentName({ ...agent, local: { ...agent.local!, agentLabel: 'Review' } }), 'Review')
+})
+
+test("this computer's signed-out agent signs in right here; others do not", () => {
+  const here = { userId: 'owner', deviceId: 'mac' }
+
+  assert.equal(thisComputerSignIn(local('a', 'mac', false), here), 'codex')
+  assert.equal(thisComputerSignIn(local('a', 'mac', null), here), 'codex')
+  assert.equal(thisComputerSignIn(local('a', 'mac', true), here), undefined)
+  assert.equal(thisComputerSignIn(local('a', 'box1', false), here), undefined)
+  assert.equal(
+    thisComputerSignIn(local('a', 'mac', false), { ...here, userId: 'other' }),
+    undefined,
+  )
+  assert.equal(thisComputerSignIn(local('a', 'mac', false), null), undefined)
+  const extra = local('a', 'mac', false)
+
+  assert.equal(
+    thisComputerSignIn({ ...extra, local: { ...extra.local!, instanceId: 'x' } }, here),
+    undefined,
+  )
+  assert.equal(thisComputerSignIn({ ...extra, provider: 'grok' }, here), undefined)
 })

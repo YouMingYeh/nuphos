@@ -7,41 +7,14 @@ import { reportedAgents } from '../agent-registry'
 import { RUNTIME_PRESENCE_HEARTBEAT_MS } from './presence'
 import { desktopFrameSchema, holderChannel, parseJson, streamChannel } from './protocol'
 
+import type { RuntimeTunnel, TunnelConnection, TunnelHolderDeps } from './holder-types'
 import type { BoxMetrics } from '../metrics-schema'
-import type { TunnelBus } from './bus'
-import type { LocalRuntimePresenceStore } from './presence'
-import type { BackendFrame, HolderMessage, LocalRuntimeStatus, StreamMessage } from './protocol'
-import type { RequestOrigin } from '@/lib/request-origin'
+import type { HolderMessage, LocalRuntimeStatus, StreamMessage } from './protocol'
 
-export type TunnelConnection = {
-  send(frame: BackendFrame): void
-  close(code: number, reason: string): void
-}
-
-export type TunnelHolderDeps = {
-  bus: TunnelBus
-  presence: LocalRuntimePresenceStore
-  isMember: (userId: string, teamId: string) => Promise<boolean>
-  heartbeatMs?: number
-  idleTimeoutMs?: number
-  /** Keeps the agents a report shows signed in listed while the computer is offline. */
-  recordAgents?: (
-    userId: string,
-    deviceId: string,
-    status: LocalRuntimeStatus,
-    from?: RequestOrigin,
-  ) => Promise<void>
-  /** Told when the tunnel opens or closes; must not throw. */
-  connectionChanged?: (userId: string, deviceId: string) => void
-}
-
-export type RuntimeTunnel = {
-  receive(raw: string): void
-  /** The socket closed, with the WebSocket close code and reason when known. */
-  closed(code?: number, reason?: string): void
-}
+export type { RuntimeTunnel, TunnelConnection, TunnelHolderDeps } from './holder-types'
 
 const DEFAULT_IDLE_TIMEOUT_MS = 15_000
+const DEFAULT_CHANNEL_TIMEOUT_MS = 60_000
 
 export const TUNNEL_CLOSE_SUPERSEDED = 4000
 export const TUNNEL_CLOSE_IDLE = 4001
@@ -60,14 +33,16 @@ export async function attachRuntimeTunnel(
   deps: TunnelHolderDeps,
 ): Promise<RuntimeTunnel> {
   const conn = randomUUID()
-  const streams = new Map<string, string>()
+  const streams = new Map<string, { actorId: string; teamId: string }>() // who opened it, in which team
   const channel = holderChannel(userId, deviceId)
   let status: LocalRuntimeStatus | undefined
   let recorded: string | undefined
   let metrics: BoxMetrics | undefined
   let metricsReceivedAt: number | undefined
-  let metricsLeaseUntil = 0
+  const heartbeatMs = deps.heartbeatMs ?? RUNTIME_PRESENCE_HEARTBEAT_MS
   let lastFrameAt = Date.now()
+  let lastEchoAt = lastFrameAt
+  let presenceAt = 0
   let ended = false
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let unsubscribe = () => {}
@@ -87,6 +62,15 @@ export async function attachRuntimeTunnel(
       })
       .catch(() => shut(TUNNEL_CLOSE_IDLE, 'Device presence unavailable'))
 
+  // Any frame shows the computer is alive. A pong queued behind data arrives late,
+  // so pongs alone would read a busy tunnel as silent.
+  const sawFrame = () => {
+    lastFrameAt = Date.now()
+    if (lastFrameAt - presenceAt < heartbeatMs) return
+    presenceAt = lastFrameAt
+    void refreshPresence()
+  }
+
   const end = () => {
     if (ended) return
     ended = true
@@ -99,12 +83,13 @@ export async function attachRuntimeTunnel(
     void deps.presence.clear(userId, deviceId, conn).catch(() => {})
   }
   // Every close is logged once with its reason, whichever side ended the tunnel.
-  const logClosed = (code: number | undefined, reason: string) =>
+  const logClosed = (code: number | undefined, reason: string, extra?: Record<string, unknown>) =>
     logEvent('info', 'agent.local_runtime.tunnel_closed', {
       user_id: userId,
       device_id: deviceId,
       code,
       reason,
+      ...extra,
     })
   const shut = (code: number, reason: string) => {
     if (ended) return
@@ -123,7 +108,7 @@ export async function attachRuntimeTunnel(
 
       return
     }
-    streams.set(message.s, message.actorId)
+    streams.set(message.s, { actorId: message.actorId, teamId: message.teamId })
     connection.send({
       t: 'open',
       s: message.s,
@@ -148,27 +133,26 @@ export async function attachRuntimeTunnel(
 
         return
       case 'revoke-actor':
-        for (const [s, actorId] of streams)
-          if (actorId === message.actorId) {
+        for (const [s, { actorId, teamId }] of streams)
+          if (actorId === message.actorId && (message.teamId ?? teamId) === teamId) {
             streams.delete(s)
             connection.send({ t: 'close', s })
             void toStream(s, {
               t: 'close',
               code: 4003,
-              reason: 'Your access to this Box was removed',
+              reason: 'Your access to this computer was removed',
             })
           }
 
         return
       case 'ping':
-        if (message.conn === conn) connection.send({ t: 'ping' })
+        if (message.conn === conn) lastEchoAt = Date.now()
 
         return
       case 'metrics':
         if (message.conn === conn && Number.isFinite(message.leaseMs)) {
           const leaseMs = Math.min(12_000, Math.max(0, message.leaseMs))
 
-          metricsLeaseUntil = Date.now() + leaseMs
           connection.send({ t: 'metrics', leaseMs })
         }
 
@@ -187,16 +171,22 @@ export async function attachRuntimeTunnel(
   }
 
   unsubscribe = await deps.bus.subscribe(channel, onHolderMessage)
+  // The computer is pinged directly, so a slow Redis never reads as a dead computer. The bus
+  // ping only checks this replica's subscription, which carries every stream, with a long window.
   heartbeat = setInterval(() => {
-    if (Date.now() - lastFrameAt > (deps.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS)) {
-      shut(TUNNEL_CLOSE_IDLE, 'No frames from the computer')
+    if (Date.now() - lastFrameAt > (deps.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS))
+      return shut(TUNNEL_CLOSE_IDLE, 'No frames from the computer')
+    if (Date.now() - lastEchoAt > (deps.channelTimeoutMs ?? DEFAULT_CHANNEL_TIMEOUT_MS)) {
+      // Else the computer's next tunnel waits forever on the same dead subscription.
+      deps.bus.reconnect?.()
 
-      return
+      return shut(TUNNEL_CLOSE_IDLE, 'Device channel unavailable')
     }
+    connection.send({ t: 'ping' })
     void deps.bus
       .publish(channel, JSON.stringify({ t: 'ping', conn } satisfies HolderMessage))
-      .catch(() => shut(TUNNEL_CLOSE_IDLE, 'Device channel unavailable'))
-  }, deps.heartbeatMs ?? RUNTIME_PRESENCE_HEARTBEAT_MS)
+      .catch(() => {})
+  }, heartbeatMs)
 
   try {
     const previous = await deps.presence.claim(userId, deviceId, conn)
@@ -206,7 +196,6 @@ export async function attachRuntimeTunnel(
         channel,
         JSON.stringify({ t: 'supersede', conn, previous } satisfies HolderMessage),
       )
-    await deps.bus.publish(channel, JSON.stringify({ t: 'ping', conn } satisfies HolderMessage))
   } catch (error) {
     end()
     throw error
@@ -219,17 +208,27 @@ export async function attachRuntimeTunnel(
       if (ended) return
       const parsed = desktopFrameSchema.safeParse(parseJson(raw))
 
-      if (!parsed.success) return
+      if (!parsed.success) {
+        // Paths only: the frame is the computer's own data.
+        logEvent('warn', 'agent.local_runtime.frame_rejected', {
+          user_id: userId,
+          device_id: deviceId,
+          issues: parsed.error.issues.map((issue) => issue.path.join('.')).join(', '),
+        })
+
+        return
+      }
       const frame = parsed.data
 
       switch (frame.t) {
         case 'metrics':
-          if (Date.now() >= metricsLeaseUntil) return
           metrics = frame.metrics
           metricsReceivedAt = Date.now()
+          // This write is also the heartbeat, so a 5-second report adds none.
+          presenceAt = metricsReceivedAt
           void refreshPresence()
-
-          return
+          deps.recordMetrics?.(userId, deviceId, frame.metrics)
+          break
         case 'status': {
           const reported = frame.status
 
@@ -248,22 +247,21 @@ export async function attachRuntimeTunnel(
                 recorded = undefined
               })
           }
-
-          return
+          break
         }
         case 'pong':
-          lastFrameAt = Date.now()
-          void refreshPresence()
-
-          return
+          // Answers the heartbeat; it counts as liveness like every other frame.
+          break
+        case 'dropped':
+          // The old tunnel died on the computer's side; its close never reached us.
+          logClosed(frame.code, frame.reason, { closed_by: 'desktop', silent_ms: frame.silentMs })
+          break
         case 'opened':
           if (streams.has(frame.s)) void toStream(frame.s, { t: 'opened' })
-
-          return
+          break
         case 'data':
           if (streams.has(frame.s)) void toStream(frame.s, { t: 'data', d: frame.d })
-
-          return
+          break
         case 'close':
           if (streams.delete(frame.s))
             void toStream(frame.s, {
@@ -272,6 +270,7 @@ export async function attachRuntimeTunnel(
               ...(frame.reason ? { reason: frame.reason } : {}),
             })
       }
+      sawFrame()
     },
     closed(code, reason) {
       if (!ended) {

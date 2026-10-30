@@ -3,9 +3,11 @@ import { createCodePlugin } from '@streamdown/code'
 import clsx from 'clsx'
 import { ExternalLink, Link2, PanelRight } from 'lucide-react'
 import { isValidElement, memo, useContext, useMemo, useState } from 'react'
-import { Streamdown } from 'streamdown'
+import { Streamdown, defaultRemarkPlugins } from 'streamdown'
 import 'streamdown/styles.css'
 
+import { t } from '../../i18n'
+import { remarkCodexDirectives } from '../../lib/codexDirectives'
 import { linkClickMode } from '../../lib/linkClickMode'
 import { isSynthesizedAutolink } from '../../lib/markdownAutolink'
 import { messageRehypePlugins } from '../../lib/messageRehypePlugins'
@@ -13,13 +15,18 @@ import { isMac } from '../../lib/platform'
 import { ContextMenu } from '../ContextMenu'
 
 import { ChatLinkMenuContext, isChatMenuLink } from './chatLinkMenuContext'
+import { standaloneLocalLink } from './localPreviewLink'
 import { MarkdownImage, ReplyImage } from './ReplyImage'
 
+import type { LinkRenderOptions } from './localPreviewLink'
 import type { ContextMenuItem } from '../ContextMenu'
 import type { ComponentProps, MouseEvent, ReactNode } from 'react'
 
 type StreamdownComponents = ComponentProps<typeof Streamdown>['components']
 type StreamdownAnimated = ComponentProps<typeof Streamdown>['animated']
+
+// Streamdown's defaults (GFM), then Codex directives, which need GFM's nodes.
+const messageRemarkPlugins = [...Object.values(defaultRemarkPlugins), remarkCodexDirectives]
 
 const STREAMING_TEXT_ANIMATION: StreamdownAnimated = {
   animation: 'atlas-stream-in',
@@ -85,20 +92,20 @@ export function ChatLink({
       ? [
           {
             key: 'open-in-app',
-            label: 'Open in Nuphos',
+            label: t('Open in Nuphos'),
             icon: PanelRight,
             onSelect: () => menuActions.openInApp(link),
           },
           {
             key: 'open-external',
-            label: 'Open in external browser',
+            label: t('Open in external browser'),
             icon: ExternalLink,
             onSelect: () => menuActions.openExternal(link),
           },
           { key: 'sep', separator: true },
           {
             key: 'copy-link',
-            label: 'Copy link',
+            label: t('Copy link'),
             icon: Link2,
             onSelect: () => menuActions.copyLink(link),
           },
@@ -129,7 +136,7 @@ export function ChatLink({
 function createComponents(
   teamId?: string,
   onLinkClick?: (href: string, beside: boolean) => boolean,
-  renderLink?: (href: string, children: ReactNode) => ReactNode | null,
+  renderLink?: (href: string, children: ReactNode, options?: LinkRenderOptions) => ReactNode | null,
 ): StreamdownComponents {
   return {
     img: ({ src, alt, width, height }) => {
@@ -147,12 +154,19 @@ function createComponents(
         <MarkdownImage src={url} alt={alt} width={width} height={height} />
       )
     },
-    p: ({ children }) => <p className="my-3 leading-[1.75] first:mt-0 last:mb-0">{children}</p>,
+    p: ({ children }) => {
+      const preview = standaloneLocalLink(children)
+      const card = preview && renderLink?.(preview.href, preview.children, { standalone: true })
+
+      return <p className="my-3 leading-[1.75] first:mt-0 last:mb-0">{card ?? children}</p>
+    },
     ul: ({ children }) => (
       <ul className="my-3 list-outside list-disc space-y-1.5 pl-5">{children}</ul>
     ),
-    ol: ({ children }) => (
-      <ol className="my-3 list-outside list-decimal space-y-1.5 pl-5">{children}</ol>
+    ol: ({ children, start }) => (
+      <ol start={start} className="my-3 list-outside list-decimal space-y-1.5 pl-5">
+        {children}
+      </ol>
     ),
     li: ({ children }) => <li className="leading-[1.75]">{children}</li>,
     h1: ({ children }) => (
@@ -223,7 +237,7 @@ type Props = {
   currentUrl?: string
   onLinkClick?: (href: string, beside: boolean) => boolean
   /** Render a link as a custom node instead of the default anchor (return null to fall through). */
-  renderLink?: (href: string, children: ReactNode) => ReactNode | null
+  renderLink?: (href: string, children: ReactNode, options?: LinkRenderOptions) => ReactNode | null
 }
 
 export const MessageResponse = memo(
@@ -255,6 +269,7 @@ export const MessageResponse = memo(
           // cjk: ends an autolink at CJK punctuation. Without it `https://…/ec2，然後`
           // swallows the rest of the sentence into the href.
           plugins={{ code: codePlugin, cjk: cjkPlugin }}
+          remarkPlugins={messageRemarkPlugins}
           rehypePlugins={messageRehypePlugins}
           components={components}
         >

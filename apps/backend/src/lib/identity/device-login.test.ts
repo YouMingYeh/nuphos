@@ -12,6 +12,9 @@ type Doc = Record<string, unknown>
 
 function matches(doc: Doc, filter: Doc): boolean {
   return Object.entries(filter).every(([key, expected]) => {
+    if (expected && typeof expected === 'object' && '$exists' in (expected as Doc)) {
+      return (doc[key] !== undefined) === (expected as { $exists: boolean }).$exists
+    }
     if (expected && typeof expected === 'object' && '$gt' in (expected as Doc)) {
       const value = doc[key]
 
@@ -45,13 +48,18 @@ class FakeCollection {
 
     return cursor
   }
-  async findOneAndUpdate(filter: Doc, update: { $set: Doc }, opts?: { returnDocument?: string }) {
+  async findOneAndUpdate(
+    filter: Doc,
+    update: { $set?: Doc; $unset?: Doc },
+    opts?: { returnDocument?: string },
+  ) {
     const hit = this.docs.find((d) => matches(d, filter))
 
     if (!hit) return null
     const before = { ...hit }
 
     Object.assign(hit, update.$set)
+    for (const key of Object.keys(update.$unset ?? {})) delete hit[key]
 
     return opts?.returnDocument === 'before' ? before : hit
   }
@@ -61,6 +69,13 @@ class FakeCollection {
     if (hit) Object.assign(hit, update.$set)
 
     return { matchedCount: hit ? 1 : 0 }
+  }
+  async updateMany(filter: Doc, update: { $set: Doc }) {
+    const hits = this.docs.filter((d) => matches(d, filter))
+
+    for (const hit of hits) Object.assign(hit, update.$set)
+
+    return { modifiedCount: hits.length }
   }
   async findOneAndDelete(filter: Doc) {
     const hit = this.docs.find((d) => matches(d, filter))
@@ -76,6 +91,9 @@ class FakeCollection {
     if (hit) this.docs = this.docs.filter((d) => d !== hit)
 
     return { deletedCount: hit ? 1 : 0 }
+  }
+  async deleteMany() {
+    return { deletedCount: 0 }
   }
   async createIndex() {
     return ''
@@ -121,8 +139,18 @@ const {
   pollDeviceLogin,
   startDeviceLogin,
 } = await import('@/lib/identity/device-login')
-const { authenticateCliToken, cliTokenDenied, listCliTokens, revokeCliToken } =
-  await import('@/lib/identity/cli-tokens')
+const {
+  authenticateCliToken,
+  backfillPersonalTokenExpiry,
+  cliTokenDenied,
+  listCliTokens,
+  mintCliToken,
+  revokeCliToken,
+  updateAgentProfile,
+} = await import('@/lib/identity/cli-tokens')
+const { createCliAuthRoutes } = await import('@/routes/cli-auth')
+const { errorHandler } = await import('@/lib/errors')
+const { Hono } = await import('hono')
 
 let now = new Date('2026-10-21T00:00:00Z')
 const advance = (sec: number) => {
@@ -181,6 +209,9 @@ describe('device login', () => {
 
     if (result.status !== 'approved') throw new Error(result.status)
     expect(result.cliToken).toMatchObject({ kind: 'personal', name: 'laptop' })
+    expect(result.cliToken.expiresAt).toBe(
+      new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000).toISOString(),
+    )
     expect(result.cliToken.teamId).toBeUndefined()
   })
 
@@ -235,6 +266,52 @@ describe('device login', () => {
   })
 })
 
+describe('how long a token lasts', () => {
+  const DAY = 24 * 60 * 60
+
+  test('a personal token lapses after 90 days unused, and each use pushes that out', async () => {
+    const { token } = await mintCliToken({ kind: 'personal', userId: USER.id, name: 'laptop' })
+
+    advance(80 * DAY)
+    expect(await authenticateCliToken(token)).not.toBeNull()
+    advance(80 * DAY)
+    expect(await authenticateCliToken(token)).not.toBeNull()
+    advance(91 * DAY)
+    expect(await authenticateCliToken(token)).toBeNull()
+  })
+
+  test('an agent token lasts until it is revoked', async () => {
+    const { token } = await mintCliToken({
+      kind: 'agent',
+      userId: USER.id,
+      teamId: TEAM,
+      name: 'bot',
+    })
+
+    advance(400 * DAY)
+    expect(await authenticateCliToken(token)).not.toBeNull()
+  })
+
+  test('personal tokens made before expiry existed get 90 days from deploy', async () => {
+    const { token } = await mintCliToken({ kind: 'personal', userId: USER.id, name: 'old' })
+    const { token: bot } = await mintCliToken({
+      kind: 'agent',
+      userId: USER.id,
+      teamId: TEAM,
+      name: 'bot',
+    })
+
+    for (const doc of collection('cli_tokens').docs) delete doc.expiresAt
+    expect(await backfillPersonalTokenExpiry()).toBe(1)
+    expect(await backfillPersonalTokenExpiry()).toBe(0)
+    advance(89 * DAY)
+    expect(await authenticateCliToken(token)).not.toBeNull()
+    advance(91 * DAY)
+    expect(await authenticateCliToken(token)).toBeNull()
+    expect(await authenticateCliToken(bot)).not.toBeNull()
+  })
+})
+
 describe('what each token kind may call', () => {
   const agent = { kind: 'agent' as const }
   const personal = { kind: 'personal' as const }
@@ -252,6 +329,13 @@ describe('what each token kind may call', () => {
   test('a personal token lists and revokes its own', () => {
     expect(cliTokenDenied(personal, 'GET', '/auth/cli-tokens')).toBeNull()
     expect(cliTokenDenied(personal, 'DELETE', '/auth/cli-tokens/abc')).toBeNull()
+  })
+
+  test('no CLI token sees or ends sign-in sessions', () => {
+    for (const token of [personal, agent]) {
+      expect(cliTokenDenied(token, 'GET', '/auth/sessions')).not.toBeNull()
+      expect(cliTokenDenied(token, 'DELETE', '/auth/sessions/current')).not.toBeNull()
+    }
   })
 
   test('an agent token stays off the account, tokens, membership and billing', () => {
@@ -297,5 +381,125 @@ describe('what each token kind may call', () => {
     ]) {
       expect(cliTokenDenied(agent, method!, path!)).toBeNull()
     }
+  })
+})
+
+describe('an agent edits its own profile, and nothing else', () => {
+  const app = new Hono()
+
+  app.route(
+    '/auth',
+    createCliAuthRoutes(async () => true),
+  )
+  app.onError(errorHandler)
+
+  const call = (token: string, method: string, path: string, body?: unknown) =>
+    app.request(`/auth${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+
+  async function mintAll() {
+    const self = await mintCliToken({
+      kind: 'agent',
+      userId: USER.id,
+      teamId: TEAM,
+      name: 'Grok Bot',
+    })
+    const sibling = await mintCliToken({
+      kind: 'agent',
+      userId: USER.id,
+      teamId: TEAM,
+      name: 'Other Bot',
+    })
+    const personal = await mintCliToken({ kind: 'personal', userId: USER.id, name: 'laptop' })
+    const stranger = await mintCliToken({
+      kind: 'agent',
+      userId: '507f1f77bcf86cd799439099',
+      teamId: TEAM,
+      name: 'Stranger Bot',
+    })
+
+    return { self, sibling, personal, stranger }
+  }
+
+  // `lastUsedAt` is the sign-in bookkeeping every authenticated call writes.
+  const profile = (docs: Doc[]) => JSON.stringify(docs.map(({ lastUsedAt: _, ...doc }) => doc))
+  const snapshot = () => profile(collection('cli_tokens').docs)
+
+  test('renames only the calling token; extra fields in the body are ignored', async () => {
+    const { self } = await mintAll()
+    const others = () =>
+      profile(
+        collection('cli_tokens').docs.filter(
+          (d) => !(d._id as { equals: (id: string) => boolean }).equals(self.principal.id),
+        ),
+      )
+    const before = others()
+
+    const res = await call(self.token, 'PATCH', '/agent-profile', {
+      name: 'Grok 2',
+      userId: '507f1f77bcf86cd799439099',
+      teamId: OTHER_TEAM,
+      kind: 'personal',
+      avatarUrl: 'https://lh3.googleusercontent.com/x',
+    })
+
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { cliToken: unknown }).cliToken).toEqual({
+      id: self.principal.id,
+      kind: 'agent',
+      name: 'Grok 2',
+      teamId: TEAM,
+    })
+    expect(others()).toBe(before)
+    // The owner's account is never written.
+    expect(collection('users').docs).toEqual([])
+  })
+
+  test('another token cannot be targeted, by path or by kind', async () => {
+    const { self, sibling, personal } = await mintAll()
+    const before = snapshot()
+
+    for (const path of [
+      `/cli-tokens/${sibling.principal.id}/avatar`,
+      `/cli-tokens/${self.principal.id}/avatar`,
+    ]) {
+      expect((await call(self.token, 'DELETE', path)).status).toBe(403)
+      expect((await call(self.token, 'PUT', path)).status).toBe(403)
+    }
+    // A personal sign-in is the user, not an agent: it has no agent profile.
+    expect((await call(personal.token, 'PATCH', '/agent-profile', { name: 'x' })).status).toBe(403)
+    expect(snapshot()).toBe(before)
+  })
+
+  test("the owner path reaches only the owner's own agent tokens", async () => {
+    const { self, personal, stranger } = await mintAll()
+    const before = snapshot()
+
+    await expect(
+      updateAgentProfile(USER.id, stranger.principal.id, { name: 'x' }),
+    ).rejects.toMatchObject({ status: 404 })
+    await expect(
+      updateAgentProfile(USER.id, personal.principal.id, { name: 'x' }),
+    ).rejects.toMatchObject({ status: 404 })
+    await expect(
+      updateAgentProfile('507f1f77bcf86cd799439099', self.principal.id, { avatar: null }),
+    ).rejects.toMatchObject({ status: 404 })
+    await expect(updateAgentProfile(USER.id, 'not-an-id', { name: 'x' })).rejects.toMatchObject({
+      status: 404,
+    })
+    expect(snapshot()).toBe(before)
+  })
+
+  test('the new name is what the next message is attributed to', async () => {
+    const { self } = await mintAll()
+
+    await call(self.token, 'PATCH', '/agent-profile', { name: 'Grok 2' })
+    expect((await authenticateCliToken(self.token))?.cliToken.name).toBe('Grok 2')
   })
 })

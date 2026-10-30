@@ -5,6 +5,8 @@ import '@/routes/agent'
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 
 import { getLocalActiveAgentRun } from '@/lib/agent/run-admission'
+import { localRuntimeUrl } from '@/lib/agent/devices/local-runtime/address'
+import { runtimePresenceStore } from '@/lib/agent/devices/local-runtime/presence'
 import { useAgentDb } from '@/lib/test/doubles/agent-db'
 import { useConversationChatRoute } from '@/lib/test/doubles/conversation-chat-route'
 import { useDb } from '@/lib/test/doubles/db'
@@ -148,6 +150,7 @@ function hold(conversationId: string, state: Promise<Record<string, unknown>>) {
     conversationOwnerUserId: 'owner',
     locale: 'en-US',
     openabSessionId: `sess_${conversationId}`,
+    endpoint,
     client: {
       getSessionExecutionState: () => state,
       close: () => closed.push(conversationId),
@@ -209,6 +212,42 @@ test('a failed adoption is retried a bounded number of times, never dropped sile
   }
 
   expect(tries).toBe(5)
+  expect(stored.size).toBe(0)
+})
+
+test('a handoff for an offline computer waits for it, however long, and is adopted once it is back', async () => {
+  // Each 2 s tick used to spend an attempt on a computer that could not answer,
+  // so a computer offline at deploy time lost its session for good.
+  const computer = { userId: 'owner', deviceId: 'laptop', provider: 'claude-code' as const }
+  const tries: string[] = []
+  const adopt = async (claimed: RuntimeHandoff) => {
+    tries.push(claimed.conversationId)
+  }
+
+  stored.set(
+    'team:conv',
+    JSON.stringify({
+      ...handoff(Date.now() - HANDOFF_SETTLE_MS - 60 * 60_000),
+      runtimeUrl: localRuntimeUrl(computer, 'team'),
+    }),
+  )
+  for (let round = 0; round < 7; round++) await adoptRuntimeHandoffs(adopt)
+
+  expect(tries).toEqual([])
+  expect(stored.has('team:conv')).toBe(true)
+
+  await runtimePresenceStore().claim(computer.userId, computer.deviceId, 'tunnel')
+  await runtimePresenceStore().put(computer.userId, computer.deviceId, {
+    conn: 'tunnel',
+    seenAt: Date.now(),
+  })
+  try {
+    await adoptRuntimeHandoffs(adopt)
+  } finally {
+    await runtimePresenceStore().clear(computer.userId, computer.deviceId, 'tunnel')
+  }
+
+  expect(tries).toEqual(['conv'])
   expect(stored.size).toBe(0)
 })
 
@@ -347,7 +386,34 @@ test('shutdown hands on a session whose runtime still owns work, and leaves idle
     ownerUserId: 'owner',
     actorUserId: 'actor',
     locale: 'en-US',
+    runtimeUrl: endpoint.url,
   })
+})
+
+test('shutdown hands on a runtime-started turn this replica carries, even mid-turn', async () => {
+  // A wakeup or background-task continuation is still running (here waiting on
+  // a deploy) when the drain ends. It has no turn route to hand it on, so the
+  // open transcript is what says this replica owns its output.
+  hold(
+    'carried',
+    Promise.resolve({
+      ...snapshot,
+      state: 'active',
+      phase: 'running_tools',
+    }),
+  )
+  sessionsByConversation.get('team:carried')!.autonomousTranscriptOpen = true
+  hold(
+    'turn-elsewhere',
+    Promise.resolve({
+      ...snapshot,
+      state: 'active',
+      phase: 'running_tools',
+    }),
+  )
+
+  expect(await publishRuntimeHandoffs()).toBe(1)
+  expect(published()).toEqual(['team:carried'])
 })
 
 test('a session already handed off for its turn is handed off once', async () => {

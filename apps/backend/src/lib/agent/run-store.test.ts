@@ -383,6 +383,36 @@ describe('agent run busy-guard lifecycle (issue #338)', () => {
     }
   })
 
+  test('a runtime-started turn is visible but never takes the guard from a backend turn', async () => {
+    const releaseAutonomous = startAgentRunOwnership(USER, SESSION, 'autonomous', {
+      runtimeOwned: true,
+    })
+
+    await flush()
+    expect(await getActiveAgentRunForSession(USER, SESSION)).toMatchObject({
+      streamId: 'autonomous',
+      runtimeOwned: true,
+    })
+
+    const releaseTurn = await claimSession()
+
+    try {
+      // The autonomous heartbeat keeps running; it must not write itself back.
+      const again = startAgentRunOwnership(USER, SESSION, 'autonomous', { runtimeOwned: true })
+
+      await flush()
+      again()
+      expect(await getActiveAgentRunForSession(USER, SESSION)).toMatchObject({
+        streamId: STREAM,
+        runtimeOwned: false,
+      })
+    } finally {
+      releaseTurn()
+      releaseAutonomous()
+      await flush()
+    }
+  })
+
   test('a clean finish releases the guard immediately', async () => {
     const releaseOwnership = await claimSession()
 
@@ -560,27 +590,5 @@ describe('crashed replica recovery', () => {
     redis.advance(25_000)
     await sweepAbandonedAgentRuns()
     expect(await redis.hmget(RUNTIME_HANDOFFS_KEY, `team:${SESSION}`)).toEqual([null])
-  })
-})
-
-describe('human turn', () => {
-  test('records whether a person started the running turn', async () => {
-    for (const [humanTurn, expected] of [
-      [undefined, true],
-      [false, false],
-    ] as const) {
-      const release = startAgentRunOwnership(USER, SESSION, STREAM, {
-        humanTurn,
-        heartbeatMs: 1_000_000,
-      })
-
-      try {
-        await flush()
-        expect((await getActiveAgentRunForSession(USER, SESSION))?.humanTurn).toBe(expected)
-      } finally {
-        release()
-        await flush()
-      }
-    }
   })
 })

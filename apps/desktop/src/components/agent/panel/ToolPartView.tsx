@@ -3,8 +3,10 @@ import clsx from 'clsx'
 import { ChevronRight, ShieldCheck, Terminal } from 'lucide-react'
 import { useState } from 'react'
 
+import { t } from '../../../i18n'
 import { useReportVisibleError } from '../../VisibleErrorReporter'
 
+import { failedOutput } from './activity'
 import { AuthorizationApprovalActions } from './AuthorizationActions'
 import { CodeSection, CommandTerminalView } from './CommandTerminalView'
 import { disclosureControlClass, LoadingText, ToolElapsedBadge } from './partChrome'
@@ -23,10 +25,10 @@ export function ToolPartView({
   /** Start with the details shown — a run of one call opens straight to them. */
   initiallyOpen?: boolean
 }) {
+  const errored = part.state === 'output-error' || failedOutput(part.output)
   // An approval request opens itself; a finished command collapses again.
   const [open, setOpen] = useState(initiallyOpen || part.state === 'approval-requested')
   const done = part.state === 'output-available' || part.state === 'output-error'
-  const errored = part.state === 'output-error'
   const label = getToolLabel(part)
   const commandTool = isCommandTool(part)
   const hasLiveOutput = Boolean(part.liveOutput?.stdout || part.liveOutput?.stderr)
@@ -50,7 +52,13 @@ export function ToolPartView({
     openedFor.id !== part.toolCallId ||
     openedFor.hasLiveOutput !== hasLiveOutput
   ) {
-    setOpenedFor({ commandTool, done, state: part.state, id: part.toolCallId, hasLiveOutput })
+    setOpenedFor({
+      commandTool,
+      done,
+      state: part.state,
+      id: part.toolCallId,
+      hasLiveOutput,
+    })
     if (part.state === 'approval-requested') setOpen(true)
     else if (commandTool && done) setOpen(false)
     else if (commandTool && hasLiveOutput && !openedFor.hasLiveOutput) setOpen(true)
@@ -114,8 +122,8 @@ export function ToolPartView({
                 </span>
                 <span>
                   {(part.approval?.approved ?? part.authorization?.resolved === 'approved')
-                    ? 'You approved this command.'
-                    : 'You declined this command.'}
+                    ? t('You approved this command.')
+                    : t('You declined this command.')}
                 </span>
               </div>
             )}
@@ -123,9 +131,11 @@ export function ToolPartView({
               <CommandTerminalView part={part} />
             ) : (
               <>
-                {part.input !== undefined && <CodeSection label="Input" value={part.input} />}
-                {part.output !== undefined && <CodeSection label="Output" value={part.output} />}
-                {part.errorText && <CodeSection label="Error" value={part.errorText} />}
+                {part.input !== undefined && <CodeSection label={t('Input')} value={part.input} />}
+                {part.output !== undefined && (
+                  <CodeSection label={t('Output')} value={part.output} />
+                )}
+                {part.errorText && <CodeSection label={t('Error')} value={part.errorText} />}
               </>
             )}
           </div>

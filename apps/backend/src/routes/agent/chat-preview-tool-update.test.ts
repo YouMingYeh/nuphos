@@ -3,8 +3,10 @@ import { describe, expect, test } from 'bun:test'
 import {
   closeCallsCutOffBySteer,
   handlePreviewToolUpdate,
+  oneLineTitle,
   openToolCalls,
 } from './chat-preview-tool-update'
+import { parseToolUpdate } from '@/lib/claude-code-preview/preview-agent-update'
 import { INTERRUPTED_TOOL_ERROR } from '@/lib/claude-code-preview/preview-transcript'
 
 import type { createPreviewToolLog } from './chat-preview-run'
@@ -26,6 +28,37 @@ function toolLog(): ToolLog {
 }
 
 describe('handlePreviewToolUpdate', () => {
+  test('a Codex nuphos-tools call is recorded as the classic tool with its own input', () => {
+    const frames: Record<string, unknown>[] = []
+    const recorded = new Map<string, unknown>()
+    const log = toolLog()
+
+    log.record = (toolCallId, name, input) => {
+      recorded.set(toolCallId, { name, input })
+    }
+    const args = {
+      category: 'integration',
+      providers: ['cloudflare'],
+      question: 'Can you connect the Cloudflare account?',
+      label: 'Enabling Cloudflare access',
+    }
+
+    const rawInput = { server: 'nuphos-tools', tool: 'request_user_decision', arguments: args }
+    // codex-acp starts an MCP call as `mcp.<server>.<tool>` with its arguments
+    // wrapped, then completes it with the wrapped input again but no title.
+    const updates = [
+      { title: 'mcp.nuphos-tools.request_user_decision', status: 'in_progress', rawInput },
+      { status: 'completed', rawInput, rawOutput: { result: { content: [] }, error: null } },
+    ]
+
+    for (const payload of updates) {
+      const update = parseToolUpdate('call_1', payload)
+
+      if (update.kind === 'tool') handlePreviewToolUpdate((f) => frames.push(f), log, update)
+    }
+    expect([...recorded]).toEqual([['call_1', { name: 'request_user_decision', input: args }]])
+    expect(frames).toEqual([])
+  })
   test('retains disk-full details when the adapter only sends rawOutput', () => {
     const frames: Record<string, unknown>[] = []
     const failures: string[] = []
@@ -155,5 +188,26 @@ describe('closeCallsCutOffBySteer', () => {
 
     closeCallsCutOffBySteer((frame) => frames.push(frame), log, [])
     expect(frames).toEqual([])
+  })
+})
+
+describe('oneLineTitle', () => {
+  test('a multi-line command title keeps its first line; the input holds the rest', () => {
+    expect(oneLineTitle("python3 - <<'EOF'\nprint(1)\nEOF")).toBe("python3 - <<'EOF'")
+  })
+
+  test('a long line is cut with an ellipsis', () => {
+    const title = oneLineTitle(`echo ${'x'.repeat(500)}`)
+
+    expect(title).toHaveLength(120)
+    expect(title.endsWith('…')).toBe(true)
+  })
+
+  test('a blank title is empty, so the call keeps its known name', () => {
+    expect(oneLineTitle('  \n  ')).toBe('')
+  })
+
+  test('a short title is unchanged', () => {
+    expect(oneLineTitle('Run kubectl get pods')).toBe('Run kubectl get pods')
   })
 })

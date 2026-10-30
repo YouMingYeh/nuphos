@@ -1,7 +1,7 @@
-// The server queue is a session's only queue. A client that declares
-// `serverQueue` sends every message at once: it runs now when the session is
-// free, or waits in the queue behind whatever arrived first, human or agent.
-// The release that frees the session starts the next one (startQueuedTurn).
+// The server queue is a session's only queue. Every new message from any
+// client runs now when the session is free, or waits in the queue behind
+// whatever arrived first, human or agent. The release that frees the session
+// starts the next one (startQueuedTurn).
 import { randomUUID } from 'node:crypto'
 
 import { agentMessages } from '@/lib/agent/db'
@@ -11,14 +11,15 @@ import { hasQueuedTranscriptMessage } from '@/lib/agent/pending-queue'
 import { sessionReleased } from '@/lib/agent/session-released'
 import { startTraceSpan } from '@/lib/agent/tracing'
 import { resolveConversationChatRuntime } from '@/lib/claude-code-preview/agent-chat-runtime'
-import { refusal } from '@/lib/claude-code-preview/runtime-refusal'
 import { AppError } from '@/lib/errors'
 import { signNuphosToken } from '@/lib/identity'
 import { logEvent } from '@/lib/observability'
 
 import { launchAcceptedChatTurn } from './chat-post-run'
 import { buildSlackBoundTurnPlan } from './chat-slack-bound'
+import { decisionReplyOf } from './decision-reply'
 import { claimAgentRunForSession, createAgentRun } from './run-registry'
+import { queuedChatBody } from './session-queue-body'
 import { getFirstUserMessage } from './transcript'
 import { acceptAgentRun } from './turn-start-frame'
 
@@ -51,14 +52,18 @@ export type QueueableChat = {
 export function queuedChatContext(
   c: Context,
   locale: string,
-  localTools: boolean,
+  body: Pick<AgentChatBody, 'clientCapabilities' | 'decisionReplyTo'>,
   kubeContext: string | undefined,
 ): QueueableChat['context'] {
   const diagramId = c.req.header('X-Atlas-Diagram-Id')?.trim()
+  const capabilities = body.clientCapabilities
+  const decisionReplyTo = decisionReplyOf(body)
 
   return {
     locale,
-    localTools,
+    localTools: capabilities?.localTools === true,
+    ...(capabilities?.decisionReplies === true ? { decisionReplies: true } : {}),
+    ...(decisionReplyTo ? { decisionReplyTo } : {}),
     currentUrl:
       c.req.header('X-Atlas-Url') ?? c.req.header('referer') ?? c.req.header('origin') ?? null,
     ...(kubeContext ? { kubeContext } : {}),
@@ -66,7 +71,7 @@ export function queuedChatContext(
   }
 }
 
-function messageText(message: UIMessage): string {
+export function messageText(message: UIMessage): string {
   return message.parts
     .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
     .join('\n\n')
@@ -74,8 +79,9 @@ function messageText(message: UIMessage): string {
 
 // A queued id is shown to everyone in the conversation and removed by value.
 const QUEUED_ID = /^[\w-]{1,128}$/
-// Attachments are references; this bounds what one waiting message stores.
-const MAX_QUEUED_MESSAGE_CHARS = 256_000
+// What a direct send can store: its message becomes one Mongo document, capped
+// at 16 MB. A waiting message (inline photos included) sits in Redis until then.
+const MAX_QUEUED_MESSAGE_CHARS = 12_000_000
 
 /** A new message, not a continuation, reply or Slack-bound turn, in an existing conversation. */
 function freshSend({ body, conversation, ...args }: QueueableChat): AgentConversation | null {
@@ -90,8 +96,7 @@ function freshSend({ body, conversation, ...args }: QueueableChat): AgentConvers
 /**
  * The session claim when the message runs now, 'queued' when it waits. Null
  * leaves the request to the older admission (continuations, replies,
- * Slack-bound and new conversations), which an older client's new message
- * also takes once nothing waits ahead of it.
+ * Slack-bound and new conversations).
  */
 export async function admitQueueableChat(
   args: QueueableChat,
@@ -102,13 +107,6 @@ export async function admitQueueableChat(
   const message = args.clientView.at(-1)
 
   if (!conversation || !message) return null
-  if (args.body.clientCapabilities?.serverQueue !== true) {
-    // An older client resends a refused message, so it waits its turn too.
-    if (await hasQueuedTranscriptMessage(args.runOwnerUserId, conversation.sessionId))
-      throw refusal('Messages sent earlier are still waiting for the agent')
-
-    return null
-  }
   // Without an authoritative runtime status the earlier admission answers 503.
   if (conversation.claudeCodePreview && args.snapshot?.schemaVersion !== 2 && !args.runtimeOffline)
     return null
@@ -168,6 +166,24 @@ export async function admitQueueableChat(
 }
 
 /**
+ * Every reply to a send that waits in the queue: behind a busy session, an
+ * offline Box, or an owner's approval. iOS and Android up to their current
+ * releases read only an event stream: it ends this send cleanly, and their
+ * idle poll follows the queued turn when it starts. Delete the stream once
+ * both declare serverQueue.
+ */
+export function queuedChatReply(
+  body: AgentChatBody,
+  reply: { status: 'queued'; streamId: string },
+): Response {
+  if (body.clientCapabilities?.serverQueue === true) return Response.json(reply, { status: 202 })
+
+  return new Response(`data: ${JSON.stringify({ type: 'atlas-stream-done' })}\n\n`, {
+    headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' },
+  })
+}
+
+/**
  * Runs a queued app send as its sender's chat turn, with the context and stream
  * the sender's device sent it with. The caller's session claim passes to the
  * turn, which lets go of it when it ends.
@@ -183,24 +199,23 @@ export async function launchQueuedChatTurn(
   const actorUserId = item.actorUserId ?? conversation.userId
 
   if (!teamId) throw new Error('A queued message lost its conversation team.')
-  // A redelivered or already answered message must not run twice.
+  // A refused attempt already persisted its input before calling the runtime.
+  // Only unattempted deliveries can use input presence as the duplicate guard:
+  // a counted retry explicitly did not run and still needs to reach the agent.
+  const retrying = (item.attempts ?? 0) > 0
+
   if (
-    await agentMessages().findOne(
+    !retrying &&
+    (await agentMessages().findOne(
       { sessionId, userId: conversation.userId, messageId: item.id },
       { projection: { _id: 1 } },
-    )
+    ))
   ) {
     releaseClaim()
 
     return
   }
-  const body: AgentChatBody = {
-    id: sessionId,
-    teamId,
-    messages: [chat.message],
-    streamId: chat.streamId,
-    clientCapabilities: { localTools: chat.localTools, serverQueue: true },
-  }
+  const body = queuedChatBody(sessionId, teamId, chat)
   const { messages } = await buildSlackBoundTurnPlan({
     body,
     clientView: [chat.message],

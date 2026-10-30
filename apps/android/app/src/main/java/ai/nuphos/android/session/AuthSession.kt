@@ -67,6 +67,10 @@ class AuthSession(
     private var consentRequest = 0L
 
     var onIdentityReset: () -> Unit = {}
+    /** Optional durable cleanup barrier; the application supplies its ordered shared-draft actor. */
+    var awaitIdentityCleanup: (suspend () -> Unit)? = null
+    /** Runs before a sign-out ends its session on the server, for work that still needs the token. */
+    var beforeSessionEnd: suspend () -> Unit = {}
 
     private fun beginIdentity(preserveDrafts: Boolean = false): Long {
         if (state !is State.Restoring) onIdentityReset()
@@ -116,6 +120,7 @@ class AuthSession(
                     }
                 } else {
                     composerDrafts.clear()
+                    onIdentityReset()
                     runtimeSelections.clear()
                     AiAccess.revoke()
                     if (result.version != AccountApi.AI_CONSENT_VERSION) {
@@ -162,6 +167,7 @@ class AuthSession(
                         }
                     } else {
                         composerDrafts.clear()
+                        onIdentityReset()
                         runtimeSelections.clear()
                         AiAccess.revokeIfCurrent(current, revision)
                     }
@@ -176,6 +182,25 @@ class AuthSession(
             } finally {
                 if (generation == expected && request == consentRequest) consentBusy = false
             }
+        }
+    }
+
+    /** Uploads a profile photo, or removes it with `null`. */
+    suspend fun setAvatar(image: ByteArray?): Boolean {
+        val current = token ?: return false
+        val expected = generation
+        val id = user?.id ?: return false
+        profileError = null
+        return try {
+            val updated = AccountApi(current).setAvatar(image)
+            if (!matches(expected, current) || updated.id != id) false
+            else { state = State.SignedIn(updated); true }
+        } catch (_: NuphosApi.Failure.Unauthorized) {
+            if (matches(expected, current)) signOut(NuphosApi.Failure.Unauthorized.message)
+            false
+        } catch (e: Exception) {
+            if (matches(expected, current)) profileError = e.message ?: "We could not update your photo."
+            false
         }
     }
 
@@ -303,16 +328,26 @@ class AuthSession(
         }
     }
 
-    fun passwordSignIn(email: String, password: String) {
+    fun passwordSignIn(email: String, password: String) = credentialSignIn(email, password, true)
+
+    fun emailSignIn(email: String, code: String, newPassword: String? = null) =
+        credentialSignIn(email, code, false, newPassword)
+
+    fun cancelCredentialSignIn() {
+        if (state is State.SigningIn && loginAttempt == null) signOut()
+    }
+
+    private fun credentialSignIn(email: String, credential: String, password: Boolean, newPassword: String? = null) {
         if (state !is State.SignedOut) return
         val expected = beginIdentity()
         state = State.SigningIn
         loginJob = scope.launch {
             try {
                 val received = try {
-                    AccountApi("").passwordSignIn(email, password)
+                    if (password) AccountApi("").passwordSignIn(email, credential)
+                    else AccountApi("").emailSignIn(email, credential, newPassword)
                 } catch (_: NuphosApi.Failure.Unauthorized) {
-                    if (generation == expected) state = State.SignedOut("The email or password is incorrect.")
+                    if (generation == expected) state = State.SignedOut(if (password) "The email or password is incorrect." else "Incorrect or expired code. Request a new code if needed.")
                     return@launch
                 }
                 val user = NuphosApi.currentUser(received)
@@ -329,9 +364,13 @@ class AuthSession(
             } catch (_: NuphosApi.Failure.Unauthorized) {
                 if (generation == expected) state = State.SignedOut(NuphosApi.Failure.Unauthorized.message)
             } catch (e: NuphosApi.Failure.Http) {
-                if (generation == expected) state = State.SignedOut(e.message)
+                if (generation == expected) state = State.SignedOut(if (password) e.message else when (e.code) {
+                    400 -> "Incorrect or expired code, or invalid details. Check your entries or request a new code."
+                    429 -> "Too many attempts. Wait before requesting a new code."
+                    else -> "Email sign-in did not complete. Try again or request a new code."
+                })
             } catch (_: Exception) {
-                if (generation == expected) state = State.SignedOut("Password sign-in did not complete. Check your details and connection, then try again.")
+                if (generation == expected) state = State.SignedOut("Sign-in did not complete. Check your details and connection, then try again.")
             } finally {
                 if (generation == expected) loginJob = null
             }
@@ -378,14 +417,34 @@ class AuthSession(
     }
 
     fun signOut(error: String? = null) {
-        beginIdentity()
+        val ended = token
+        val expected = beginIdentity()
+        // Signed out here at once; ending the session on the server is best effort.
+        if (ended != null) scope.launch {
+            beforeSessionEnd()
+            AccountApi(ended).endSession()
+        }
         customTabsOpen = false
         cancelLogin()
         clearToken()
-        state = State.SignedOut(error)
+        val cleanup = awaitIdentityCleanup
+        if (cleanup == null) state = State.SignedOut(error)
+        else {
+            // Hide authenticated UI immediately, but do not acknowledge logout before queued private-draft deletion.
+            state = State.Restoring
+            scope.launch {
+                val cleanupError = try { cleanup(); null }
+                catch (failure: Exception) {
+                    if (failure is kotlinx.coroutines.CancellationException) throw failure
+                    "Signed out, but saved draft cleanup failed. Check storage before closing the app."
+                }
+                if (generation == expected && token == null) state = State.SignedOut(cleanupError ?: error)
+            }
+        }
     }
 
     private fun clearToken() {
+        onIdentityReset()
         // Remove BYOK credentials without needing to decrypt a broken keystore.
         app.deleteSharedPreferences("nuphos.voice")
         composerDrafts.clear()

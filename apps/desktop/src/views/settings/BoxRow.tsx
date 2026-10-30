@@ -1,4 +1,3 @@
-import clsx from 'clsx'
 import { Ellipsis, Loader2, Play } from 'lucide-react'
 import { useState } from 'react'
 
@@ -9,13 +8,18 @@ import { InlineRename } from '../../components/ui/inline-rename'
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from '../../components/ui/menu'
 import { toast } from '../../components/ui/toast'
 import { RUNTIME_INSTANCES_CHANGED } from '../../hooks/useRuntimeInstances'
+import { t } from '../../i18n'
 
-import { visibleAgent } from './agentPresentation'
 import { BoxAccessDialog } from './BoxAccessDialog'
 import { BoxAgentSetup } from './BoxAgentSetup'
+import { agentSlots, canAddAgent } from './boxAgentSlots'
+import { DeskArt } from './BoxDesk'
+import { DeskAgents, DeskReadings } from './BoxDeskInfo'
+import { deskModel } from './boxDeskModel'
 import { openBoxDesktop } from './boxDesktop'
-import { BoxMetrics } from './BoxMetrics'
-import { AccessHint, AgentTile, LiveDot, MachineIcon, MachineLine, NewAgentMenu } from './BoxParts'
+import { BoxHostUpdate } from './BoxHostUpdate'
+import { AccessHint, LiveDot, MachineLine } from './BoxParts'
+import { copyUid } from './boxCopyUid'
 import { openBoxPaywall } from './boxPaywallStore'
 import {
   BOX_BADGE,
@@ -23,12 +27,13 @@ import {
   boxState,
   canManage,
   canShareBox,
-  removal,
   newAgentAction,
+  removal,
 } from './boxPresentation'
-import { boxRestartLabel, boxRestartOf } from './boxRestartPresentation'
+import { boxRestartLabel, boxRestartOf, boxUpdateLabel } from './boxRestartPresentation'
 import { boxRestarts, useBoxRestart } from './boxRestartStore'
 import { RuntimeLoginDialog } from './RuntimeLoginDialog'
+import { useBoxHostUpdate } from './useBoxHostUpdate'
 
 import type { AgentDevice } from '../../api'
 import type { LocalAgentProvider } from '../../api/device-types'
@@ -42,6 +47,8 @@ export function BoxRow({
   agents,
   onSelect,
   onChanged,
+  onShare,
+  onSetUpLocalAgent,
 }: {
   thisComputer: boolean
   teamId: string
@@ -49,6 +56,10 @@ export function BoxRow({
   agents: RuntimeInstance[]
   onSelect: (runtimeId: string) => void
   onChanged: () => void
+  /** The person's own computer: share its local runtime with teammates. */
+  onShare?: () => void
+  /** Opens User settings where this computer's local agent signs in. */
+  onSetUpLocalAgent?: () => void
 }) {
   const [busy, setBusy] = useState(false)
   // An older host's existing agent, signing in.
@@ -92,7 +103,7 @@ export function BoxRow({
 
   // The host takes a while to join after the machine starts; the card follows it until then.
   const resume = () =>
-    act('Could not resume Box', async (deviceId, team) => {
+    act(t('Could not resume computer'), async (deviceId, team) => {
       await api.boxResume(deviceId, team)
       boxRestarts.start(deviceId, team, 'resume')
     })
@@ -107,26 +118,49 @@ export function BoxRow({
 
   const dim = state === 'paused' || state === 'stopped'
   const settingUp = state === 'creating' || state === 'connecting'
-  const starting =
-    settingUp || restart !== undefined || (state === 'running' && agents.length === 0)
+  const slots = agentSlots(thisComputer, settingUp || restart !== undefined, state, agents)
   const metricsStatus = settingUp ? state : device.metricsStatus
   const away = !restart && (state === 'paused' || state === 'hostOffline')
+  const hostAgent = cloud && manage && state === 'running' && !restart ? agents[0]?.id : undefined
+  const updateVersion = useBoxHostUpdate(teamId, hostAgent)
+  const [confirmUpdate, setConfirmUpdate] = useState(false)
+  const update = () =>
+    act(t('Could not update computer'), async (deviceId, team) => {
+      if (!hostAgent) return
+      await api.atlasRequestRuntimeUpdate(team, hostAgent)
+      boxRestarts.start(deviceId, team, 'update')
+    })
+
+  const model = deskModel(device)
 
   return (
-    <li className="flex h-[240px] w-[248px] shrink-0 flex-col rounded-xl border border-zGray-800/70 p-3">
-      {/* The name has the header to itself, so it and its rename field use the card's width.
-          A fixed height keeps the taller rename field from pushing the card's contents down. */}
-      <div className="flex h-6 shrink-0 items-center gap-2">
-        <MachineIcon device={device} />
+    <li className="flex w-[300px] shrink-0 flex-col">
+      <DeskArt model={model} on={!away && !dim}>
+        <DeskReadings device={device} metricsStatus={restart ? 'connecting' : metricsStatus} />
+        <DeskAgents
+          device={device}
+          agents={agents}
+          slots={slots}
+          away={away}
+          dim={dim}
+          busy={busy}
+          onSelect={onSelect}
+          onAdd={addAgent}
+          onSetUp={thisComputer ? onSetUpLocalAgent : undefined}
+          canAdd={canAddAgent(state)}
+        />
+      </DeskArt>
+      {/* A fixed height keeps the taller rename field from pushing the caption down. */}
+      <div className="mt-2 flex h-6 shrink-0 items-center gap-2">
         <InlineRename
           value={device.label}
           canEdit={manage}
           editing={renaming}
           onEditingChange={setRenaming}
-          ariaLabel={cloud ? 'Box name' : 'Computer name'}
+          ariaLabel={t('Computer name')}
           maxLength={200}
-          errorTitle={`Could not rename ${cloud ? 'Box' : 'computer'}`}
-          className="flex-1 text-[13px] font-medium text-main"
+          errorTitle={t('Could not rename computer')}
+          className="min-w-0 text-[13px] font-medium text-main"
           // This computer keeps its name locally and re-registers with it, so rename it there.
           onSave={async (label) => {
             await (thisComputer
@@ -135,10 +169,16 @@ export function BoxRow({
             changed()
           }}
         />
+        {thisComputer && (
+          <span className="shrink-0 rounded-full bg-zGray-800/60 px-1.5 text-[10.5px] leading-4 text-secondary">
+            {t('This computer')}
+          </span>
+        )}
+        <span className="flex-1" />
         {manage && (
           <Menu>
             <MenuTrigger
-              aria-label={`Manage ${device.label}`}
+              aria-label={t('Manage {name}', { name: device.label })}
               disabled={busy}
               className="-mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-tertiary hover:bg-zGray-800/60 hover:text-main"
             >
@@ -147,21 +187,28 @@ export function BoxRow({
             <MenuContent align="end">
               {cloud && state === 'running' && (
                 <MenuItem onClick={() => openBoxDesktop(device.deviceId, teamId)}>
-                  Open desktop
+                  {t('Open desktop')}
                 </MenuItem>
               )}
-              <MenuItem onClick={() => setRenaming(true)}>Rename</MenuItem>
-              {canShareBox(device) && (
-                <MenuItem onClick={() => setSharing(true)}>Manage access…</MenuItem>
+              {updateVersion !== undefined && (
+                <MenuItem onClick={() => setConfirmUpdate(true)}>
+                  {boxUpdateLabel(updateVersion)}
+                </MenuItem>
               )}
+              <MenuItem onClick={() => setRenaming(true)}>{t('Rename')}</MenuItem>
+              <MenuItem onClick={() => void copyUid(device)}>{t('Copy UID')}</MenuItem>
+              {canShareBox(device) && (
+                <MenuItem onClick={() => setSharing(true)}>{t('Manage access…')}</MenuItem>
+              )}
+              {onShare && <MenuItem onClick={onShare}>{t('Share with teammates…')}</MenuItem>}
               {actions.resume && (
                 <MenuItem onClick={() => void resume()}>
-                  {state === 'error' ? 'Retry' : 'Resume'}
+                  {state === 'error' ? t('Retry') : t('Resume')}
                 </MenuItem>
               )}
               {actions.pause && (
-                <MenuItem onClick={() => void act('Could not pause Box', api.boxPause)}>
-                  Pause
+                <MenuItem onClick={() => void act(t('Could not pause computer'), api.boxPause)}>
+                  {t('Pause')}
                 </MenuItem>
               )}
               {remove.allowed && (
@@ -176,7 +223,7 @@ export function BoxRow({
           </Menu>
         )}
       </div>
-      <div className="mt-1 flex shrink-0 items-center gap-1.5 text-[11px] leading-4 text-tertiary">
+      <div className="mt-0.5 flex min-w-0 shrink-0 items-center gap-1.5 text-[11.5px] leading-4 text-tertiary">
         <span role="status" className="flex items-center gap-1.5">
           {restart ? (
             <Loader2 aria-hidden className="h-3 w-3 animate-spin" />
@@ -185,44 +232,27 @@ export function BoxRow({
           )}
           {restart ? boxRestartLabel(restart.kind) : badge.label}
         </span>
+        <MachineLine device={device} dim={dim} />
         <AccessHint device={device} />
+        {updateVersion !== undefined && (
+          <BoxHostUpdate
+            boxLabel={device.label}
+            version={updateVersion}
+            busy={busy}
+            confirming={confirmUpdate}
+            onConfirmingChange={setConfirmUpdate}
+            onUpdate={update}
+          />
+        )}
       </div>
-      <MachineLine device={device} thisComputer={thisComputer} dim={dim} />
-      {manage && away ? (
-        <div className="mt-auto pb-1">
+      {manage && away && (
+        <div className="mt-2">
           <Button size="sm" variant="secondary" disabled={busy} onClick={() => void resume()}>
             {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-            {busy ? 'Resuming…' : 'Resume'}
+            {busy ? t('Resuming…') : t('Resume')}
           </Button>
         </div>
-      ) : (
-        <BoxMetrics
-          metrics={device.metrics}
-          status={restart ? 'connecting' : metricsStatus}
-          receivedAt={device.metricsReceivedAt}
-        />
       )}
-      <ul
-        className={clsx(
-          away ? 'hidden' : 'mt-auto flex shrink-0 items-center gap-2 overflow-x-auto pb-1',
-          dim && 'opacity-50',
-        )}
-      >
-        {starting
-          ? [0, 1].map((slot) => (
-              <li key={slot} className="h-10 w-10 shrink-0 rounded-lg bg-zGray-800/30" />
-            ))
-          : agents
-              .filter(visibleAgent)
-              .map((agent) => (
-                <AgentTile key={agent.id} agent={agent} onSelect={() => onSelect(agent.id)} />
-              ))}
-        {!dim && !starting && (
-          <li className="shrink-0">
-            <NewAgentMenu device={device} agents={agents} busy={busy} onAdd={addAgent} />
-          </li>
-        )}
-      </ul>
       {adding && (
         <BoxAgentSetup
           teamId={teamId}
@@ -256,7 +286,7 @@ export function BoxRow({
       )}
       <ConfirmDialog
         open={confirmDelete}
-        title={`${cloud ? 'Delete' : 'Remove'} ${device.label}?`}
+        title={remove.title}
         description={remove.description}
         destructive
         confirmLabel={remove.confirm}

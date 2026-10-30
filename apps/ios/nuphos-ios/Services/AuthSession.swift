@@ -20,7 +20,11 @@ final class AuthSession {
     private(set) var state: State = .restoring {
         didSet {
             switch state {
-            case .signedIn(let user): Analytics.shared.identify(user)
+            case .signedIn(let user):
+                Analytics.shared.identify(user)
+                if aiConsentAccepted, let version = aiConsentVersion {
+                    LaunchCache.write(LaunchCache.User(user: user, aiConsentVersion: version))
+                }
             case .signedOut: Analytics.shared.reset()
             case .restoring, .signingIn: break
             }
@@ -31,7 +35,7 @@ final class AuthSession {
     private(set) var aiConsentVersion: String?
     private(set) var aiConsentError: String?
 
-    private static let tokenKey = "session-token"
+    static let tokenKey = "session-token"
     private let presentationContext = WebAuthPresentationContext()
     private var webSession: ASWebAuthenticationSession?
 
@@ -42,8 +46,10 @@ final class AuthSession {
 
     // MARK: - Launch
 
-    /// Restores a saved session. A token the backend no longer honours is
-    /// discarded; a network failure keeps it and asks the user to retry.
+    /// Restores a saved session. The user the last launch showed opens Home
+    /// at once while the token is checked behind it. A token the backend no
+    /// longer honours is discarded; a network failure keeps it, and without
+    /// a cached user asks the user to retry.
     func restore() async {
         #if DEBUG
         // `-preview-home` launch argument: render the home screen with a
@@ -80,15 +86,27 @@ final class AuthSession {
         }
 
         token = saved
+        if let cached = LaunchCache.read(LaunchCache.User.self), cached.aiConsentVersion == AccountAPI.aiConsentVersion {
+            aiConsentAccepted = true
+            aiConsentVersion = cached.aiConsentVersion
+            state = .signedIn(cached.user)
+        }
         do {
             let user = try await NuphosAPI.currentUser(token: saved)
             await loadAIConsent()
+            // Home may already be open from the cache, so the user can sign
+            // out, or in again, before this answers. That session wins.
+            guard token == saved else { return }
             state = .signedIn(user)
         } catch NuphosAPI.Failure.unauthorized {
+            guard token == saved else { return }
             clearToken()
             state = .signedOut(error: nil)
         } catch {
-            state = .signedOut(error: "We could not reach Nuphos. Check your connection and try again.")
+            guard token == saved else { return }
+            if self.user == nil {
+                state = .signedOut(error: "We could not reach Nuphos. Check your connection and try again.")
+            }
         }
     }
 
@@ -164,9 +182,9 @@ final class AuthSession {
         }
     }
 
+    /// A failed lookup keeps what is known: nothing on a fresh sign-in, the
+    /// cached answer on a launch that already opened Home.
     func loadAIConsent() async {
-        aiConsentAccepted = false
-        aiConsentVersion = nil
         aiConsentError = nil
         guard let token else { return }
         do {
@@ -182,7 +200,10 @@ final class AuthSession {
         }
         let result: AccountAPI.Consent = try await AccountAPI.request("ai-consent", method: "PUT", token: token, body: ["version": version, "accepted": accepted])
         aiConsentAccepted = result.accepted
-        if !accepted { ComposerDrafts.clear() }
+        if !accepted {
+            ComposerDrafts.clear()
+            LaunchCache.clear()
+        }
     }
 
     func emailSignIn(email: String, credential: String, password: Bool, newPassword: String? = nil) async throws {
@@ -210,6 +231,13 @@ final class AuthSession {
         state = .signedIn(user)
     }
 
+    /// Uploads a profile photo, or removes it with `nil`.
+    func setAvatar(_ image: Data?) async throws {
+        guard let token else { throw NuphosAPI.Failure.unauthorized }
+        let user: NuphosUser = try await AccountAPI.request("me/avatar", method: image == nil ? "DELETE" : "PUT", token: token, upload: image)
+        state = .signedIn(user)
+    }
+
     func refreshUser() async {
         guard let token, case .signedIn = state else { return }
         do {
@@ -224,18 +252,24 @@ final class AuthSession {
 
     func signOut(error: String? = nil) {
         Analytics.shared.track("logout")
-        Task { await PushNotifications.shared.deactivate() }
+        let token = token
+        // Push unregisters with the token, so the session ends after it.
+        Task {
+            await PushNotifications.shared.deactivate()
+            if let token { await AccountAPI.endSession(token: token) }
+        }
         webSession?.cancel()
         webSession = nil
         clearToken()
         ComposerDrafts.clear()
-        // The OpenAI key is billed to whoever entered it, not the next user.
-        Keychain.delete(Whisper.keychainKey)
+        // An OpenAI key saved by builds from before voice input moved to Nuphos.
+        Keychain.delete("openai-api-key")
         state = .signedOut(error: error)
     }
 
     private func clearToken() {
         Keychain.delete(Self.tokenKey)
+        LaunchCache.clear()
         token = nil
         aiConsentAccepted = false
         aiConsentVersion = nil

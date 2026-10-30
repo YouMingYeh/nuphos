@@ -2,6 +2,7 @@ import { api } from '../../../api'
 import { svg } from '../../../lib/atlas-link-mention/icons'
 import { isAtlasUrl, renderMentionChip } from '../../../lib/atlasLinkMention'
 
+import { attachmentDragPaths } from './attachmentDrag'
 import { isImageAttachmentPath } from './attachments'
 
 // ------------------------------------------------------------------------
@@ -83,6 +84,17 @@ export function readEditorText(el: HTMLDivElement | null): string {
  * chips. `[Image #N]` becomes a chip only when the caller restores the same
  * images (a draft); a recalled message has none, so it stays plain text.
  */
+/** Focus the editor with the caret after its last character. */
+export function focusAtEnd(el: HTMLElement) {
+  el.focus({ preventScroll: true })
+  const caret = document.createRange()
+
+  caret.selectNodeContents(el)
+  caret.collapse(false)
+  window.getSelection()?.removeAllRanges()
+  window.getSelection()?.addRange(caret)
+}
+
 export function restoreEditorText(el: HTMLDivElement, text: string, images = 0) {
   const nodes: Node[] = []
 
@@ -196,6 +208,17 @@ export function insertTextIntoEditor(
     sel.removeAllRanges()
     sel.addRange(range)
   }
+}
+
+/**
+ * The local paths a drop attaches. An attachment dragged from another chat is
+ * already a local file, so its path is used as-is; read synchronously, since
+ * the drop's data is gone once the event returns.
+ */
+export function dropAttachmentPaths(dt: DataTransfer): Promise<string[]> {
+  const dragged = attachmentDragPaths(dt)
+
+  return dragged.length > 0 ? Promise.resolve(dragged) : saveClipboardAttachments(dt)
 }
 
 export async function saveClipboardAttachments(data: DataTransfer): Promise<string[]> {

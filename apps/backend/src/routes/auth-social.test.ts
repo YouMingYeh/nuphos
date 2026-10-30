@@ -1,10 +1,12 @@
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 
-import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { Hono } from 'hono'
 
 import { config } from '@/config'
 import { errorHandler } from '@/lib/errors'
+import { authenticateToken } from '@/lib/identity/auth'
+import { revokeUserSession } from '@/lib/identity/sessions'
 import { signInSocial } from '@/lib/identity/social'
 import { registerNativeSession, redeemNativeSession } from '@/lib/native-auth'
 import { useDb } from '@/lib/test/doubles/db'
@@ -28,6 +30,21 @@ useDb({
     collection: (name: string) => ({
       findOne: async (filter: Doc) =>
         (docs.get(name) ?? []).find((doc) => matches(doc, filter)) ?? null,
+      find: (filter: Doc) => ({
+        limit: () => ({
+          toArray: async () => (docs.get(name) ?? []).filter((doc) => matches(doc, filter)),
+        }),
+      }),
+      updateOne: async () => ({ modifiedCount: 1 }),
+      deleteOne: async (filter: Doc) => {
+        const list = docs.get(name) ?? []
+        const index = list.findIndex((doc) => matches(doc, filter))
+
+        if (index < 0) return { deletedCount: 0 }
+        list.splice(index, 1)
+
+        return { deletedCount: 1 }
+      },
       insertOne: async (doc: Doc) => {
         if (!docs.has(name)) {
           docs.set(name, [])
@@ -125,52 +142,82 @@ const originalFetch = globalThis.fetch
 afterEach(() => {
   globalThis.fetch = originalFetch
 })
-test('native callback delivers a code bound to the original PKCE verifier', async () => {
-  const verifier = 'v'.repeat(43)
-  const registration = await registerNativeSession({
-    redirectUri: 'nuphos://google-callback',
-    codeChallenge: createHash('sha256').update(verifier).digest('base64url'),
-    codeChallengeMethod: 'S256',
-    clientState: 'ios-state',
-  })
-  const start = await app.request(`/google/start?handle=${registration.handle}`)
-  const authorization = new URL(start.headers.get('location')!)
-  const state = authorization.searchParams.get('state')!
-  const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 })
-  const kid = 'native-integration-key'
-  const payload = {
-    iss: 'https://accounts.google.com',
-    aud: 'test-client',
-    sub: 'native-subject',
-    email: 'native@example.com',
-    email_verified: true,
-    nonce: authorization.searchParams.get('nonce'),
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 300,
-  }
-  const unsigned = `${Buffer.from(JSON.stringify({ alg: 'RS256', kid })).toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}`
-  const token = `${unsigned}.${sign('RSA-SHA256', Buffer.from(unsigned), rsa.privateKey).toString('base64url')}`
+for (const native of [true, false]) {
+  test(
+    native
+      ? 'native callback delivers a code bound to the original PKCE verifier'
+      : 'browser callback creates a revocable session',
+    async () => {
+      const verifier = 'v'.repeat(43)
+      const registration = await registerNativeSession({
+        redirectUri: 'nuphos://google-callback',
+        codeChallenge: createHash('sha256').update(verifier).digest('base64url'),
+        codeChallengeMethod: 'S256',
+        clientState: 'ios-state',
+      })
+      const start = await app.request(
+        native ? `/google/start?handle=${registration.handle}` : '/google/start',
+      )
+      const authorization = new URL(start.headers.get('location')!)
+      const state = authorization.searchParams.get('state')!
+      const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 })
+      const kid = native ? 'native-integration-key' : 'browser-integration-key'
+      const payload = {
+        iss: 'https://accounts.google.com',
+        aud: 'test-client',
+        sub: 'native-subject',
+        email: 'native@example.com',
+        email_verified: true,
+        nonce: authorization.searchParams.get('nonce'),
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 300,
+      }
+      const unsigned = `${Buffer.from(JSON.stringify({ alg: 'RS256', kid })).toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}`
+      const token = `${unsigned}.${sign('RSA-SHA256', Buffer.from(unsigned), rsa.privateKey).toString('base64url')}`
 
-  globalThis.fetch = (async (url: unknown) =>
-    Response.json(
-      String(url).endsWith('/token')
-        ? { id_token: token }
-        : { keys: [{ ...rsa.publicKey.export({ format: 'jwk' }), kid, alg: 'RS256' }] },
-    )) as typeof fetch
-  const response = await app.request(`/google/callback?state=${state}&code=provider-code`, {
-    headers: { cookie: `__Host-nuphos-oauth=${state}` },
-  })
+      globalThis.fetch = (async (url: unknown) =>
+        Response.json(
+          String(url).endsWith('/token')
+            ? { id_token: token }
+            : { keys: [{ ...rsa.publicKey.export({ format: 'jwk' }), kid, alg: 'RS256' }] },
+        )) as typeof fetch
+      const response = await app.request(`/google/callback?state=${state}&code=provider-code`, {
+        headers: { cookie: `__Host-nuphos-oauth=${state}` },
+      })
 
-  expect(response.status).toBe(302)
-  const callback = new URL(response.headers.get('location')!)
+      if (!native) {
+        expect(response.status).toBe(200)
+        const cookie = response.headers
+          .getSetCookie()
+          .find((value) => value.startsWith('__Host-nuphos-social='))!
+          .split(';')[0]!
+        const sessionToken = cookie.slice(cookie.indexOf('=') + 1)
 
-  expect(callback.searchParams.get('state')).toBe('ios-state')
-  expect(callback.searchParams.has('token')).toBe(false)
-  const code = callback.searchParams.get('code')!
+        expect(sessionToken.startsWith('nus_')).toBe(true)
+        expect(response.headers.get('set-cookie')).toContain('HttpOnly')
+        const identity = await authenticateToken(sessionToken)
 
-  await expect(redeemNativeSession(registration.handle, 'x'.repeat(43), code)).rejects.toThrow()
-  expect((await redeemNativeSession(registration.handle, verifier, code)).user.email).toBe(
-    'native@example.com',
+        expect(identity?.sessionId).toBeTruthy()
+        expect(identity?.user.email).toBe('native@example.com')
+        expect((await app.request('/session', { headers: { cookie } })).status).toBe(200)
+        await revokeUserSession(identity!.user.id, identity!.sessionId!)
+        expect((await app.request('/session', { headers: { cookie } })).status).toBe(401)
+
+        return
+      }
+      expect(docs.get('user_sessions') ?? []).toHaveLength(0)
+      expect(response.status).toBe(302)
+      const callback = new URL(response.headers.get('location')!)
+
+      expect(callback.searchParams.get('state')).toBe('ios-state')
+      expect(callback.searchParams.has('token')).toBe(false)
+      const code = callback.searchParams.get('code')!
+
+      await expect(redeemNativeSession(registration.handle, 'x'.repeat(43), code)).rejects.toThrow()
+      expect((await redeemNativeSession(registration.handle, verifier, code)).email).toBe(
+        'native@example.com',
+      )
+      await expect(redeemNativeSession(registration.handle, verifier, code)).rejects.toThrow()
+    },
   )
-  await expect(redeemNativeSession(registration.handle, verifier, code)).rejects.toThrow()
-})
+}

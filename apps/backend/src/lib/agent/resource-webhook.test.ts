@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { config } from '@/config'
 
 import { githubPullState, githubResourceEvents, githubStatusCommit } from './resource-webhook'
+import { githubHealthTargets } from './resource-webhook-health'
 
 const base = { installation: { id: 12 }, repository: { id: 34, full_name: 'acme/app' } }
 
@@ -218,20 +219,33 @@ test('own merges update the linked tag state even though they never wake a sessi
     ...base,
     action: 'closed',
     sender: { type: 'Bot', login: 'nuphos[bot]' },
-    pull_request: { number: 56, state: 'closed', merged: true },
+    pull_request: {
+      number: 56,
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-10-29T03:12:00Z',
+    },
   }
 
   expect(githubResourceEvents('pull_request', merged)).toEqual([])
   expect(githubPullState('pull_request', merged)).toEqual({
     key: 'github/12/34/56',
     state: 'merged',
+    mergedAt: '2026-10-29T03:12:00Z',
   })
   expect(
     githubPullState('pull_request', {
       ...merged,
-      pull_request: { number: 56, state: 'closed', merged: false },
-    })?.state,
-  ).toBe('closed')
+      pull_request: { number: 56, state: 'closed', merged: false, merged_at: null },
+    }),
+  ).toEqual({ key: 'github/12/34/56', state: 'closed' })
+  // A merge time that is not a time is left out rather than stored.
+  expect(
+    githubPullState('pull_request', {
+      ...merged,
+      pull_request: { number: 56, state: 'closed', merged: true, merged_at: 'soon' },
+    }),
+  ).toEqual({ key: 'github/12/34/56', state: 'merged' })
   expect(
     githubPullState('pull_request', {
       ...merged,
@@ -241,4 +255,69 @@ test('own merges update the linked tag state even though they never wake a sessi
   ).toBe('open')
   expect(githubPullState('pull_request', { ...merged, action: 'synchronize' })).toBeNull()
   config.byos.github.appSlug = previous
+})
+
+test('pushes, finished CI and reviews refresh a linked PR tag, our own included', () => {
+  const previous = config.byos.github.appSlug
+
+  config.byos.github.appSlug = 'nuphos'
+  try {
+    const own = { type: 'Bot', login: 'nuphos[bot]' }
+    const target = {
+      key: 'github/12/34/56',
+      installationId: 12,
+      repository: 'acme/app',
+      number: 56,
+    }
+
+    expect(
+      githubHealthTargets('pull_request', {
+        ...base,
+        action: 'synchronize',
+        sender: own,
+        pull_request: { number: 56 },
+      }),
+    ).toEqual([target])
+    expect(
+      githubHealthTargets('check_suite', {
+        ...base,
+        action: 'completed',
+        sender: own,
+        check_suite: {
+          status: 'completed',
+          conclusion: 'failure',
+          pull_requests: [{ number: 56 }, { number: 56 }],
+        },
+      }),
+    ).toEqual([target])
+    expect(
+      githubHealthTargets('pull_request_review', {
+        ...base,
+        action: 'dismissed',
+        pull_request: { number: 56 },
+      }),
+    ).toEqual([target])
+    expect(
+      githubHealthTargets('pull_request', {
+        ...base,
+        action: 'edited',
+        pull_request: { number: 56 },
+      }),
+    ).toEqual([])
+    expect(
+      githubHealthTargets('pull_request', {
+        installation: { id: 12 },
+        repository: { id: 34 },
+        action: 'synchronize',
+        pull_request: { number: 56 },
+      }),
+    ).toEqual([])
+    // Our own statuses refresh health even though they never wake a session.
+    const status = { ...base, sha: 'a'.repeat(40), state: 'failure', sender: own }
+
+    expect(githubStatusCommit('status', status)).toBeNull()
+    expect(githubStatusCommit('status', status, true)?.state).toBe('failure')
+  } finally {
+    config.byos.github.appSlug = previous
+  }
 })

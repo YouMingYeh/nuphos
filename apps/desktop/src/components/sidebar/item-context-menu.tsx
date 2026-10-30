@@ -1,7 +1,10 @@
-import { Archive, Bell, BellOff, Pencil, Star, StarOff, Unlink } from 'lucide-react'
+import { Archive, Bell, BellOff, Hash, Link2, Pencil, Star, StarOff, Unlink } from 'lucide-react'
 
 import { api } from '../../api'
+import { t } from '../../i18n'
+import { copyLinkWithFeedback } from '../../lib/copyLink'
 import { favoriteSessionId, favoriteToggleTitle } from '../../lib/sidebarPinnedChats'
+import { agentSessionUrl } from '../agent/sessionUrl'
 import { ContextMenu } from '../ContextMenu'
 import { toast } from '../ui/toast'
 
@@ -55,8 +58,24 @@ export function SidebarItemContextMenu({
         ...(menu.item.key.startsWith('agent-session:')
           ? [
               {
+                key: 'copy-link',
+                label: t('Copy link'),
+                icon: Link2,
+                onSelect: () =>
+                  copy(
+                    agentSessionUrl(teamId, menu.item.key.slice('agent-session:'.length)),
+                    'Link',
+                  ),
+              },
+              {
+                key: 'copy-session-id',
+                label: t('Copy agent ID'),
+                icon: Hash,
+                onSelect: () => copy(menu.item.key.slice('agent-session:'.length), 'Agent ID'),
+              },
+              {
                 key: 'rename',
-                label: 'Rename chat',
+                label: t('Rename agent'),
                 icon: Pencil,
                 onSelect: () =>
                   renameChat(menu.item.key.slice('agent-session:'.length), menu.item.label),
@@ -65,7 +84,7 @@ export function SidebarItemContextMenu({
                 ? [
                     {
                       key: 'unlink',
-                      label: 'Unlink from parent',
+                      label: t('Unlink from parent'),
                       icon: Unlink,
                       onSelect: () => unlinkChat(menu.item.key.slice('agent-session:'.length)),
                     },
@@ -77,7 +96,7 @@ export function SidebarItemContextMenu({
           ? [
               {
                 key: 'watch',
-                label: menu.item.watching ? 'Unwatch chat' : 'Watch chat',
+                label: menu.item.watching ? t('Unwatch agent') : t('Watch agent'),
                 icon: menu.item.watching ? BellOff : Bell,
                 onSelect: () => watchChat(menu.item, teamId),
               },
@@ -87,7 +106,7 @@ export function SidebarItemContextMenu({
           ? [
               {
                 key: 'archive',
-                label: 'Archive chat',
+                label: t('Archive agent'),
                 icon: Archive,
                 onSelect: () => archiveChat(menu.item.key.slice('agent-session:'.length)),
               },
@@ -105,6 +124,21 @@ function watchChat(item: Item, teamId: string) {
   api
     .agentSetConversationWatched(item.key.slice('agent-session:'.length), watching, teamId)
     .catch((err: unknown) => {
-      toast.apiError(watching ? 'Could not watch chat' : 'Could not unwatch chat', err)
+      toast.apiError(watching ? t('Could not watch agent') : t('Could not unwatch agent'), err)
     })
+}
+
+function copy(value: string, what: 'Link' | 'Agent ID') {
+  void copyLinkWithFeedback(value, (text) => navigator.clipboard.writeText(text), {
+    onSuccess: () =>
+      toast.success(what === 'Link' ? t('Link copied') : t('Agent ID copied'), undefined, {
+        timeoutMs: 1200,
+        dedupe: false,
+      }),
+    onError: () =>
+      toast.error(
+        what === 'Link' ? t('Could not copy link') : t('Could not copy agent ID'),
+        t('Clipboard was blocked.'),
+      ),
+  })
 }

@@ -40,6 +40,7 @@ class PullRefreshFixtureDeviceTest {
     private val requests = CopyOnWriteArrayList<Request>()
     private val originals = mutableMapOf<String, OkHttpClient>()
     private val token = "refresh-fixture-no-credentials"
+    private lateinit var navController: androidx.navigation.NavHostController
     private lateinit var store: AgentStore
     private lateinit var app: NuphosApplication
     private lateinit var fixtureAuth: AuthSession
@@ -48,6 +49,7 @@ class PullRefreshFixtureDeviceTest {
     private var savedAuth: Any? = null
     private var savedAuthToken: String? = null
     private var preferences: Map<String, *> = emptyMap<String, Any>()
+    @Volatile private var sortHistory = false
     @Volatile private var treeHistory = false
     @Volatile private var failHistory = false
     @Volatile private var holdPage = false
@@ -63,7 +65,7 @@ class PullRefreshFixtureDeviceTest {
 
     private val network = object : ExternalResource() {
         override fun before() {
-            check(InstrumentationRegistry.getInstrumentation().targetContext.packageName.endsWith(".refreshfixture")) { "Run only in the isolated refresh fixture package" }
+            check(InstrumentationRegistry.getInstrumentation().targetContext.packageName.let { it.endsWith(".refreshfixture") || it.endsWith(".listrefresh1319") }) { "Run only in the isolated refresh fixture package" }
             app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as NuphosApplication
             preferences = app.getSharedPreferences("nuphos.prefs", Context.MODE_PRIVATE).all.toMap()
             InstrumentationRegistry.getInstrumentation().runOnMainSync {
@@ -80,6 +82,7 @@ class PullRefreshFixtureDeviceTest {
                 val path = req.url.encodedPath
                 var code = 200
                 val text = when {
+                    path == "/auth/ai-consent" -> """{"version":"${AccountApi.AI_CONSENT_VERSION}","accepted":true}"""
                     path == "/teams/aaaaaaaaaaaaaaaaaaaaaaaa/favorites" -> {
                         if (failFavorites) { code = 503; "{}" }
                         else """{"revision":1,"entries":$entries}"""
@@ -87,11 +90,18 @@ class PullRefreshFixtureDeviceTest {
                     path == "/teams/bbbbbbbbbbbbbbbbbbbbbbbb/favorites" -> """{"revision":1,"entries":[{"key":"agent-session:b","label":"Team B pin"}]}"""
                     path == "/agent/conversations" -> {
                         val title = historyTitle
+                        val order = req.url.queryParameter("sort")
                         if ((holdHistory && req.url.queryParameter("cursor") == null) || (holdPage && req.url.queryParameter("cursor") != null)) {
                             holdHistory = false; holdPage = false; historyHeld.countDown()
                             check(historyRelease.await(15, TimeUnit.SECONDS))
                         }
                         if (failHistory) { code = 503; "{}" }
+                        else if (sortHistory) {
+                            val recent = """{"sessionId":"recent","teamId":"${req.url.queryParameter("teamId")}","title":"Older chat, recent activity","createdAt":"2026-01-01T00:00:00Z","lastActiveAt":"2026-10-22T00:00:00Z"}"""
+                            val created = """{"sessionId":"created","teamId":"${req.url.queryParameter("teamId")}","title":"Newer chat, older activity","createdAt":"2026-10-01T00:00:00Z","lastActiveAt":"2026-10-02T00:00:00Z"}"""
+                            val rows = if (order == "created") "$created,$recent" else "$recent,$created"
+                            """{"conversations":[$rows],"nextCursor":"${order}-cursor","hasMore":false}"""
+                        }
                         else if (treeHistory) """{"conversations":[{"sessionId":"parent","teamId":"aaaaaaaaaaaaaaaaaaaaaaaa","title":"Synthetic parent","isOwner":true},{"sessionId":"child","teamId":"aaaaaaaaaaaaaaaaaaaaaaaa","title":"Synthetic child","parentSessionId":"parent","isOwner":true}],"hasMore":false}"""
                         else if (emptyHistory) """{"conversations":[],"hasMore":false}""" else
                         """{"conversations":[{"sessionId":"normal","teamId":"${req.url.queryParameter("teamId")}","title":"$title"}],"hasMore":false}"""
@@ -145,6 +155,7 @@ class PullRefreshFixtureDeviceTest {
             compose.activity.setContent {
                 NuphosTheme(darkTheme = false) { CompositionLocalProvider(LocalAgentStore provides store, LocalAuthSession provides auth) {
                     val nav = rememberNavController()
+                    navController = nav
                     androidx.compose.runtime.SideEffect {
                         androidx.core.view.WindowCompat.getInsetsController(compose.activity.window, compose.activity.window.decorView).apply {
                             isAppearanceLightStatusBars = true
@@ -154,14 +165,29 @@ class PullRefreshFixtureDeviceTest {
                     androidx.compose.material3.Surface(Modifier.fillMaxSize()) {
                         androidx.compose.foundation.layout.Box(Modifier.systemBarsPadding()) {
                             NavHost(nav, startDestination = "history") {
-                                composable("history") { AgentPage(searching.value, { searching.value = it }, nav) }
+                                composable("history") {
+                                    androidx.compose.foundation.layout.Column {
+                                        if (sortHistory) CompositionLocalProvider(LocalPlansStore provides PlansStore(token)) {
+                                            ai.nuphos.android.ui.home.FilterButton(HomePage.Agent)
+                                        }
+                                        androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
+                                            AgentPage(searching.value, { searching.value = it }, nav)
+                                        }
+                                    }
+                                }
+                                composable("fixture-detail") { androidx.compose.material3.Text("Synthetic detail") }
                             }
                         }
                     }
                 } }
             }
         }
-        compose.waitUntil(5_000) { !store.favoritesLoading }
+        compose.waitUntil(5_000) { !store.favoritesLoading && !store.isRefreshing }
+        compose.waitUntil(5_000) {
+            try { compose.onAllNodesWithTag("chat-history-refresh").fetchSemanticsNodes().isNotEmpty() }
+            catch (_: IllegalStateException) { false }
+        }
+        compose.waitForIdle()
     }
     private fun waitText(text: String) { compose.waitUntil(5_000) { compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() } }
 
@@ -197,6 +223,53 @@ class PullRefreshFixtureDeviceTest {
     }
     private fun settled() { compose.waitUntil(10_000) { !store.isRefreshing && store.phase != AgentStore.Phase.Loading } }
 
+    @Test fun resumeReadsNewRemoteHistoryAndPinsWithoutRelaunch() {
+        render()
+        val reads = historyReads()
+        compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+        historyTitle = "Created on another client"
+        entries = entries.replace("Beyond first page", "Remote pinned chat")
+        compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+        waitText("Created on another client"); waitText("Remote pinned chat"); settled()
+        assertEquals(reads + 1, historyReads())
+        shot("resume-remote-light")
+    }
+
+    @Test fun resumeSupersedesReadStartedBeforeBackgrounding() {
+        render()
+        holdHistory = true; historyTitle = "Pre-background snapshot"
+        compose.runOnIdle { store.refresh() }
+        assertTrue(historyHeld.await(5, TimeUnit.SECONDS))
+        compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+        historyTitle = "Latest remote snapshot"
+        compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+        waitText("Latest remote snapshot"); settled()
+        historyRelease.countDown()
+        Thread.sleep(200); compose.waitForIdle()
+        compose.onNodeWithText("Pre-background snapshot").assertDoesNotExist()
+        compose.onNodeWithText("Latest remote snapshot").assertExists()
+        shot("resume-inflight-light")
+    }
+
+    @Test fun returningFromDetailRefreshesCurrentSearchAndArchiveScope() {
+        render()
+        compose.runOnIdle { store.updateSort(ConversationSort.Activity); store.updateScope(ConversationScope.Team); store.updateSearch("needle"); store.updateArchivedOnly(true) }
+        Thread.sleep(350); settled()
+        compose.runOnIdle { navController.navigate("fixture-detail") }
+        waitText("Synthetic detail")
+        val reads = historyReads()
+        historyTitle = "Remote archived result"
+        compose.runOnIdle { navController.popBackStack() }
+        waitText("Remote archived result"); settled()
+        assertEquals(reads + 1, historyReads())
+        val last = requests.last { it.url.encodedPath == "/agent/conversations" }
+        assertEquals("activity", last.url.queryParameter("sort"))
+        assertEquals("needle", last.url.queryParameter("search"))
+        assertEquals("team", last.url.queryParameter("scope"))
+        assertEquals("only", last.url.queryParameter("archived"))
+        shot("return-filtered-light")
+    }
+
     @Test fun actualGestureRefreshesHistoryAndPinsAndFailureCanRetry() {
         render()
         shot("before-light")
@@ -207,7 +280,7 @@ class PullRefreshFixtureDeviceTest {
         pull(); waitText("Fresh history"); settled(); shot("success-light")
         assertEquals(reads + 1, historyReads()); assertEquals(pins + 1, pinReads())
         failHistory = true; failFavorites = true
-        pull(); waitText("Could not refresh chats. Showing last loaded history."); settled()
+        pull(); waitText("Could not refresh agents. Showing last loaded history."); settled()
         shot("failed-retains-light")
         compose.onNodeWithText("Fresh history").assertExists()
         compose.onNodeWithText("Refreshed pin").assertExists()
@@ -219,12 +292,12 @@ class PullRefreshFixtureDeviceTest {
 
     @Test fun emptyAndSearchAndArchivedStillAcceptGestureAndKeepFilters() {
         emptyHistory = true; entries = "[]"; render()
-        waitText("No chats yet"); assertCentered("No chats yet"); shot("empty-light")
+        waitText("No agents yet"); assertCentered("No agents yet"); shot("empty-light")
         var reads = historyReads()
         pull(); compose.waitUntil(5_000) { historyReads() > reads }; settled()
         compose.runOnIdle { store.updateScope(ConversationScope.Team); searching.value = true }
-        compose.onNodeWithText("Search chats").performTextInput("needle")
-        compose.onNodeWithText("Archived").performClick()
+        compose.onNodeWithText("Search agents").performTextInput("needle")
+        compose.runOnIdle { store.updateArchivedOnly(true) }
         hideKeyboard()
         waitText("No matches")
         // Let the debounced search finish before measuring a manual refresh.
@@ -264,7 +337,7 @@ class PullRefreshFixtureDeviceTest {
     @Test fun initialErrorSurfaceCanPullToRecoverAndAccountRevocationRejectsHeldRead() {
         emptyHistory = true; entries = "[]"; render()
         compose.runOnIdle { state(store, "phase").value = AgentStore.Phase.Failed }
-        waitText("Couldn't load chats"); assertCentered("Couldn't load chats"); shot("initial-error-light")
+        waitText("Couldn't load agents"); assertCentered("Couldn't load agents"); shot("initial-error-light")
         emptyHistory = false; historyTitle = "Recovered from initial error"
         pull(); waitText("Recovered from initial error"); settled()
         holdHistory = true; historyTitle = "Wrong account response"
@@ -281,7 +354,7 @@ class PullRefreshFixtureDeviceTest {
         treeHistory = true; entries = "[]"; render()
         compose.runOnIdle { store.refresh() }
         waitText("Synthetic child"); settled()
-        compose.onNodeWithContentDescription("Hide 1 threads").performClick()
+        compose.onNodeWithContentDescription("Hide 1 sub-agents").performClick()
         compose.onNodeWithText("Synthetic child").assertDoesNotExist()
         compose.onNode(hasSetTextAction()).performTextInput("Unsent refresh fixture draft")
         compose.onNodeWithText("Unsent refresh fixture draft").assertExists()
@@ -323,10 +396,80 @@ class PullRefreshFixtureDeviceTest {
         }
         assertTrue(historyHeld.await(5, TimeUnit.SECONDS))
         work.cancel(); historyRelease.countDown()
-        waitText("Couldn't load chats")
+        waitText("Couldn't load agents")
         assertEquals(AgentStore.Phase.Failed, store.phase)
         assertFalse(store.isRefreshing)
         emptyHistory = false; historyTitle = "Recovered interrupted refresh"
         pull(); waitText("Recovered interrupted refresh"); settled()
     }
+    @Test fun sortMenuChangesOrderAndResetsCursorWithPinsAndFiltersIntact() {
+        sortHistory = true; render()
+        compose.runOnIdle { store.refresh() }
+        waitText("Newer chat, older activity"); settled()
+        assertEquals(ConversationSort.Created, store.sort)
+        assertEquals(listOf("created", "recent"), store.conversations.map { it.sessionId })
+        compose.onNodeWithContentDescription("Filter agents").performClick()
+        compose.onNodeWithText("Date created").assertIsSelected()
+        shot("sort-menu-created-light")
+        compose.onNodeWithText("Recent activity").performClick()
+        compose.waitUntil(5_000) { store.conversations.firstOrNull()?.sessionId == "recent" }
+        assertEquals(ConversationSort.Activity, store.sort)
+        assertEquals(listOf("recent", "created"), store.conversations.map { it.sessionId })
+        val last = requests.last { it.url.encodedPath == "/agent/conversations" }
+        assertEquals("activity", last.url.queryParameter("sort"))
+        assertNull(last.url.queryParameter("cursor"))
+        compose.onNodeWithText("Beyond first page").assertExists()
+        shot("sort-activity-light")
+        compose.runOnIdle { state(store, "hasMore").value = true }
+        runBlocking(Dispatchers.Main) { store.loadMore() }
+        assertEquals("activity-cursor", requests.last { it.url.encodedPath == "/agent/conversations" }.url.queryParameter("cursor"))
+        assertEquals(listOf("recent", "created"), store.conversations.map { it.sessionId })
+        compose.runOnIdle { store.updateScope(ConversationScope.Team); store.updateSearch("needle"); store.updateArchivedOnly(true) }
+        Thread.sleep(350); settled()
+        compose.runOnIdle { store.updateSort(ConversationSort.Created) }
+        compose.waitUntil(5_000) { store.conversations.firstOrNull()?.sessionId == "created" }
+        val filtered = requests.last { it.url.encodedPath == "/agent/conversations" }
+        assertEquals("created", filtered.url.queryParameter("sort"))
+        assertEquals("needle", filtered.url.queryParameter("search"))
+        assertEquals("team", filtered.url.queryParameter("scope"))
+        assertEquals("only", filtered.url.queryParameter("archived"))
+        assertNull(filtered.url.queryParameter("cursor"))
+    }
+
+    @Test fun oldCursorResponseCannotAppendAfterSortChange() {
+        sortHistory = true; render()
+        compose.runOnIdle { store.refresh() }; settled()
+        compose.waitUntil(5_000) { store.conversations.firstOrNull()?.sessionId == "created" }
+        val work = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        try {
+            holdPage = true
+            compose.runOnIdle { state(store, "hasMore").value = true; work.launch { store.loadMore() } }
+            assertTrue(historyHeld.await(5, TimeUnit.SECONDS))
+            compose.runOnIdle { store.updateSort(ConversationSort.Activity) }
+            compose.waitUntil(5_000) { store.conversations.firstOrNull()?.sessionId == "recent" }
+            historyRelease.countDown()
+            compose.waitUntil(5_000) { work.coroutineContext[Job]?.children?.none() == true }
+            assertEquals(listOf("recent", "created"), store.conversations.map { it.sessionId })
+            assertFalse(store.isLoadingMore)
+            assertEquals(ConversationSort.Activity, store.sort)
+        } finally { historyRelease.countDown(); work.cancel() }
+    }
+
+    @Test fun refreshStartedInOldOrderCannotReplaceSortSelection() {
+        sortHistory = true; render()
+        compose.runOnIdle { store.refresh() }; settled()
+        holdHistory = true
+        compose.runOnIdle { store.refresh() }
+        assertTrue(historyHeld.await(5, TimeUnit.SECONDS))
+        compose.runOnIdle { store.updateSort(ConversationSort.Activity) }
+        compose.waitUntil(5_000) { store.conversations.firstOrNull()?.sessionId == "recent" }
+        historyRelease.countDown(); settled()
+        assertEquals(listOf("recent", "created"), store.conversations.map { it.sessionId })
+        compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.STARTED)
+        compose.activityRule.scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+        compose.waitUntil(5_000) { !store.isRefreshing }
+        assertEquals("activity", requests.last { it.url.encodedPath == "/agent/conversations" }.url.queryParameter("sort"))
+        assertEquals(ConversationSort.Activity, store.sort)
+    }
+
 }

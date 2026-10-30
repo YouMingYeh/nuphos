@@ -6,16 +6,22 @@ import {
   HeartPulse,
   Inbox,
   Network,
+  Palette,
   ScrollText,
   Users,
 } from 'lucide-react'
 
 import { NuphosDashboardsView } from '../../dashboards/NuphosDashboardsView'
+import { emptyNavigation, pageLocationForNavigation } from '../../lib/appRoutes'
+import { toAbsoluteAtlasUrl } from '../../lib/webBaseUrl'
 import { dashboardsPageTitle } from '../../dashboards/view/pageTitle'
+import { t } from '../../i18n'
 import { ArchitectureView } from '../../views/ArchitectureView'
+import { ArtifactView } from '../../views/ArtifactView'
 import { ArchivedChatsView } from '../../views/ArchivedChatsView'
 import { AuditLogView } from '../../views/AuditLogView'
 import { BrowserView } from '../../views/BrowserView'
+import { DesignsView } from '../../views/DesignsView'
 import { DesktopView } from '../../views/DesktopView'
 import { InboxView } from '../../views/InboxView'
 import { MonitoringView } from '../../views/MonitoringView'
@@ -39,6 +45,8 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
     refreshKey,
     architectureDetail,
     setArchitectureDetail,
+    designDetail,
+    setDesignDetail,
     nuphosDashboard,
     nuphosDashboards,
     restoredTitle,
@@ -61,7 +69,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.agents') {
     return renderPage(
       'team.agents',
-      'Agents',
+      t('Runtimes'),
       <Bot className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <AgentSection
         key={scope.teamId}
@@ -71,12 +79,35 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
         refreshKey={refreshKey}
         onCount={onCount}
         onLoading={onLoading}
+        onOpenSettingsSection={ctx.onOpenSettingsSection}
       />,
     )
   }
 
   if (active === 'team.files') {
     return <RuntimeFilesView key={filter} teamId={scope.teamId} filePath={filter} />
+  }
+
+  if (active === 'team.artifact') {
+    return (
+      <ArtifactView
+        key={filter}
+        teamId={scope.teamId}
+        artifactId={filter}
+        onAskAgent={(prompt) => ctx.openInChat(prompt, { mode: 'text' })}
+        onOpenDesign={(designId) =>
+          onOpenNodeLink(
+            toAbsoluteAtlasUrl(
+              pageLocationForNavigation(
+                emptyNavigation(scope, 'team.designs', {
+                  designDetail: { designId, designName: 'Design' },
+                }),
+              ).href,
+            ),
+          )
+        }
+      />
+    )
   }
 
   if (active === 'team.terminal') return <TerminalView teamId={scope.teamId} filter={filter} />
@@ -87,6 +118,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.browser') {
     return (
       <BrowserView
+        teamId={scope.teamId}
         url={ctx.browserUrl}
         onNavigate={ctx.onBrowserNavigate}
         onComment={(text, filePaths) => ctx.openInChat(text, { mode: 'text', filePaths })}
@@ -97,7 +129,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.members') {
     return renderPage(
       'team.members',
-      'Members',
+      t('Members'),
       <Users className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <TeamMembersView
         teamId={scope.teamId}
@@ -112,7 +144,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.archived-chats') {
     return renderPage(
       'team.archived-chats',
-      'Archived chats',
+      t('Archived agents'),
       <Archive className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <ArchivedChatsView
         teamId={scope.teamId}
@@ -127,7 +159,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.inbox') {
     return renderPage(
       'team.inbox',
-      'Inbox',
+      t('Inbox'),
       <Inbox className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <InboxView
         teamId={scope.teamId}
@@ -142,7 +174,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.plans') {
     return renderPage(
       'team.plans',
-      'Plans',
+      t('Plans'),
       <ClipboardList className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <PlansView
         teamId={scope.teamId}
@@ -160,7 +192,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.audit') {
     return renderPage(
       'team.audit',
-      'Audit log',
+      t('Audit log'),
       <ScrollText className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <AuditLogView
         teamId={scope.teamId}
@@ -194,7 +226,7 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
   if (active === 'team.architecture') {
     return renderPage(
       'team.architecture',
-      'Architecture',
+      t('Architecture'),
       <Network className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <ArchitectureView
         teamId={scope.teamId}
@@ -215,10 +247,34 @@ export function renderTeamToolPages(ctx: ScopeRenderContext): React.ReactNode | 
       />,
     )
   }
+  if (active === 'team.designs') {
+    return renderPage(
+      'team.designs',
+      'Designs',
+      <Palette className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
+      <DesignsView
+        teamId={scope.teamId}
+        refreshKey={refreshKey}
+        filter={filter}
+        onCount={onCount}
+        onLoading={onLoading}
+        openDesignId={designDetail?.designId ?? null}
+        openDesignName={designDetail?.designName ?? null}
+        onOpenDesign={(id, name) => setDesignDetail({ designId: id, designName: name })}
+        onCloseDesign={() => setDesignDetail(null)}
+        onRenameDesign={(name) =>
+          designDetail
+            ? setDesignDetail({ designId: designDetail.designId, designName: name })
+            : undefined
+        }
+        onOpenAgentChat={onOpenAgentChat}
+      />,
+    )
+  }
   if (active === 'team.monitoring') {
     return renderPage(
       'team.monitoring',
-      'Monitoring',
+      t('Monitoring'),
       <HeartPulse className="w-3.5 h-3.5 text-tertiary" strokeWidth={1.8} />,
       <MonitoringView
         teamId={scope.teamId}

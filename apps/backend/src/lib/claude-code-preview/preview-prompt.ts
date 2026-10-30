@@ -10,7 +10,6 @@ import { getSystemPrompt } from '@/lib/agent/system-prompt'
 import { generateContextPrompt, parseUrlContext } from '@/lib/agent/url-context'
 import { loadInstructionsBlock } from '@/lib/instructions/prompt'
 import {
-  COMMUNICATION_DISCIPLINE_MESSAGE,
   buildDiagramMessage,
   buildKubeContextMessage,
   buildNuphosLinksMessage,
@@ -61,8 +60,9 @@ const runtimeNote = (where: string) =>
     '- This is a conversation principal rather than a general user session, but it is accepted by the ordinary `/teams/...` APIs. The backend applies this conversation’s team and credential selection automatically. A 403 means that operation or resource is outside the conversation’s capabilities; do not test or search for another token.',
     '- `nuphos-credentials`: use `list_credentials` to refresh the live selection. Use `get_credential` only when a provider skill has no setup script; never put a returned secret on a command line. Selection is per conversation: a credential under `notSelected` is bound to the team but not enabled here. When a task needs one that is not selected or not connected, call `request_user_decision` with category `integration` and its provider in `providers`; in the Desktop app the user connects or selects it from a card below your message. Without the Desktop app, ask them to tick that exact label in the credential picker, or to have an admin connect it under Integrations, rather than reporting it missing.',
     '- `nuphos-tools`: host-control operations such as decisions, local Desktop actions, team-skill authoring, memory, charts, and channel replies. Nuphos Dashboards, architecture diagrams, triggers, one-shot schedules, databases, knowledge, and instructions use their native skills and canonical Nuphos REST APIs.',
+    '- When progress needs an answer only the user can provide, call `nuphos-tools.request_user_decision` with the actual question and optional choices, then end the turn and wait. This registers a question in the Needs your input panel, where the user can reply to each agent separately. A question written only in chat is not registered there. Use the same tool for every agent provider; do not ask for routine choices you can resolve yourself.',
     '',
-    'Kubernetes: `~/.kube/config` starts empty. Before the first kubectl/helm/flux/argocd call, call `get_kubeconfig` (in `nuphos-tools`) and write the returned YAML to `~/.kube/config` with mode 0600. It holds one context per cluster the selected credentials reach — EKS, GKE, on-prem, and the other providers — and no current-context, so pass `--context <name>` (helm: `--kube-context`) on every call. Call it again and rewrite the file when kubectl reports an authentication error or a cluster the user just connected is missing. Do not use `gcloud container clusters get-credentials`, other provider kubeconfig commands, or the kubectl skill’s `sync-clusters.sh`.',
+    'Kubernetes: `~/.kube/config` starts empty. Before the first kubectl/helm/flux/argocd call, call `get_kubeconfig` (in `nuphos-tools`) and write the returned YAML to `~/.kube/config` with mode 0600. It holds one context per cluster the selected credentials reach — EKS, GKE, on-prem, and the other providers — and no current-context, so pass `--context <name>` (helm: `--kube-context`) on every call. Call it again and rewrite the file when kubectl reports an authentication error, a connection timeout, connection refused or no such host (the cluster’s API endpoint may have moved), or when a cluster the user just connected is missing. Re-fetch once; if the same error persists, report it instead of fetching again. Do not use `gcloud container clusters get-credentials`, other provider kubeconfig commands, or the kubectl skill’s `sync-clusters.sh`.',
   ].join('\n')
 
 /**
@@ -84,21 +84,12 @@ const PLAN_RUNTIME_NOTE =
 const DASHBOARDS_RUNTIME_NOTE =
   'For Nuphos Dashboards work (the Dashboards page of script-driven panels, not Grafana), use Claude Code’s native `nuphos-dashboards` skill FIRST, then build or update the dashboard through its API script exactly as that skill instructs.'
 
-function backgroundMonitorNote(provider: PreviewPromptArgs['provider']): string {
-  return [
-    '## Background monitoring',
-    '',
-    'Keep working on the authorized task until it is complete or blocked on information or approval. A terminal tool returning a running process/session ID only means the command yielded; it is not an acknowledgement that a durable monitor or future wakeup was registered. Never launch a duplicate command to check whether the first one finished.',
-    'Nothing you leave running inside this process survives it. The runtime process is replaced routinely — a rollout, a pod restart, an idle reap — and every background task, watcher, monitor and open shell goes with it. Nobody re-arms them and no wakeup arrives, so a turn that ends "I am watching this in the background" ends with nothing watching.',
-    'Either finish the wait inside this turn, or tell the user plainly that nothing is watching it and what they should check themselves. Say which of the two you did. An external API accepting work (for example AWS returning CREATING) is not a running monitor. Do not use shell &, nohup, or disown as a substitute for runtime-managed work.',
-    'If the runtime starts a continuation after a background command completes, inspect the completed command result and continue the original task. Do not restart the command or stop at another progress-only answer.',
-    ...(provider === 'codex'
-      ? [
-          'Wait for a yielded command with the native write_stdin tool, inspect its result, and continue the remaining work in the same turn.',
-        ]
-      : []),
-  ].join('\n')
-}
+const BACKGROUND_MONITOR_NOTE = [
+  '## Background monitoring',
+  '',
+  'Nothing you leave running inside this process survives it. The runtime process is replaced routinely — a rollout, a pod restart, an idle reap — and every background task, watcher, monitor and open shell goes with it. Nobody re-arms them and no wakeup arrives, so a turn that ends "I am watching this in the background" ends with nothing watching.',
+  'A terminal tool returning a running process/session ID or an external API accepting work (for example AWS returning CREATING) does not register a durable monitor or future wakeup. Do not use shell &, nohup, or disown as a substitute for runtime-managed work.',
+].join('\n')
 
 async function urlContextSection(currentUrl: string | null | undefined): Promise<string | null> {
   if (!currentUrl) return null
@@ -185,10 +176,9 @@ export async function buildPreviewSystemPrompt(args: PreviewPromptArgs): Promise
     urlContext,
     nativeText(`${planMessage}\n\n${PLAN_RUNTIME_NOTE}`),
     nativeText(DASHBOARDS_RUNTIME_NOTE),
-    nativeText(backgroundMonitorNote(args.provider)),
+    BACKGROUND_MONITOR_NOTE,
     previewChannelPromptSection({ teamId: args.teamId, slackThread: args.slackThread }),
     nativeText(buildNuphosLinksMessage(args.teamId, { nativeClaudeSkills: true })),
-    COMMUNICATION_DISCIPLINE_MESSAGE,
     instructions,
   ]
     .filter((section): section is string => typeof section === 'string' && section.trim() !== '')

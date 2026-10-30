@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { ChevronDown, Loader2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
+import { t } from '../../../i18n'
 import { effortLabel } from '../../../lib/configLabels'
 import { effortResetValue, effortStops } from '../../../lib/effortStops'
 import { Kbd } from '../../ui/kbd'
@@ -26,7 +27,7 @@ import type { useSessionConfig } from './useSessionConfig'
 
 export type ModelControl = Pick<
   ReturnType<typeof useSessionConfig>,
-  'data' | 'loading' | 'slow' | 'saving' | 'error' | 'stalled' | 'queued' | 'open' | 'select'
+  'data' | 'loading' | 'slow' | 'saving' | 'error' | 'queued' | 'open' | 'select'
 > & { setOpen: (open: boolean) => void; refresh: () => void }
 
 export function ModelSelector({
@@ -39,7 +40,7 @@ export function ModelSelector({
   /** Sized like the hero composer's other controls; compact otherwise. */
   hero?: boolean
 }) {
-  const { data, loading, slow, saving, error, stalled } = control
+  const { data, loading, slow, saving, error } = control
   const [view, setView] = useState<'effort' | 'models'>('effort')
   const chipRef = useRef<HTMLButtonElement>(null)
   const sliderRef = useRef<HTMLInputElement>(null)
@@ -54,7 +55,10 @@ export function ModelSelector({
   const fast = options?.find((option) => option.kind === 'fast')
   const status = data?.status
   const busy = status === 'busy'
-  const name = model ? modelName(model) : status === 'offline' ? 'Model unavailable' : ''
+  let name = slow ? t('Connecting…') : t('Model settings')
+
+  if (error || status === 'offline') name = t('Model unavailable')
+  if (model) name = modelName(model) || name
   const level = effortName(effort)
   const effortLevels = [
     ...new Set([level, ...effortStops(effort?.options ?? []).map((choice) => effortLabel(choice))]),
@@ -65,7 +69,7 @@ export function ModelSelector({
     Boolean(error) ||
     slow ||
     (status !== 'ready' && status !== 'dormant' && status !== 'busy')
-  const hint = modelHint(status, Boolean(model), busy, stalled)
+  const hint = modelHint(status, Boolean(model), busy)
 
   const setOpen = control.setOpen
   const open = control.open
@@ -118,17 +122,19 @@ export function ModelSelector({
     lines: [
       (loading || slow) &&
         !error &&
-        (slow ? 'The agent is reconnecting. This may take a moment.' : 'Getting model settings…'),
+        (slow
+          ? t('The runtime is reconnecting. This may take a moment.')
+          : t('Getting model settings…')),
       error,
-      error && model && 'Showing last synced settings.',
-      control.queued ? 'Selected for the next reply.' : hint,
+      error && model && t('Showing last synced settings.'),
+      control.queued ? t('Selected for the next reply.') : hint,
       disabled &&
         !busy &&
         status === 'ready' &&
-        'Available when this conversation is ready for your next message.',
+        t('Available when this agent is ready for your next message.'),
     ].filter((line): line is string => Boolean(line)),
     error: error ?? undefined,
-    onRetry: error || stalled ? control.refresh : undefined,
+    onRetry: error || status === 'offline' ? control.refresh : undefined,
     retrying: loading || saving,
   }
   // Closing returns to the message box, so typing carries on; switching views
@@ -153,7 +159,7 @@ export function ModelSelector({
         <Tooltip
           content={
             <span className="flex items-center gap-2">
-              Select effort <Kbd combo={EFFORT_SHORTCUT} />
+              {t('Select effort')} <Kbd combo={EFFORT_SHORTCUT} />
             </span>
           }
           disabled={control.open || !effort}
@@ -162,7 +168,13 @@ export function ModelSelector({
           <Popover.Trigger
             ref={chipRef}
             data-model-chip=""
-            aria-label={`Model settings: ${[name, level].filter(Boolean).join(' ')}${fast?.currentValue === 'on' ? ', fast mode on' : ''}`}
+            aria-label={
+              fast?.currentValue === 'on'
+                ? t('Model settings: {name}, fast mode on', {
+                    name: [name, level].filter(Boolean).join(' '),
+                  })
+                : t('Model settings: {name}', { name: [name, level].filter(Boolean).join(' ') })
+            }
             // A filled pill at rest, so opening it changes nothing but the text.
             className={clsx(
               hero ? 'h-8' : 'h-7',
@@ -172,6 +184,7 @@ export function ModelSelector({
             {saving && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
             <ModelChipLabel
               name={name}
+              loading={loading && !slow && !error && !data}
               level={level}
               levels={effortLevels}
               choosingEffort={effortOpen && Boolean(effort)}

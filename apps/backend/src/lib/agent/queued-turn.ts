@@ -1,5 +1,6 @@
 // Starts a session's next turn from its queue, in arrival order.
 import { wakeOfflineBox } from '@/lib/agent/devices/box-wake'
+import { awaitsShareApproval } from '@/lib/agent/devices/local-share'
 import { conversationExecutionState } from '@/lib/claude-code-preview/session-execution-state'
 import { getTeamMembership } from '@/lib/identity'
 import { logEvent } from '@/lib/observability'
@@ -73,8 +74,6 @@ async function dropStale(userId: string, sessionId: string, target: AgentConvers
 async function ready(userId: string, sessionId: string, target: AgentConversation | null) {
   // The holder runs this again when it lets go.
   if (await turnRunner.hasActiveAgentRunForSession(userId, sessionId)) return false
-  // An archived conversation stops polling; the send that restores it starts the queue.
-  if (target?.archivedAt) return false
   // Runtime-owned work (an automatic continuation) holds no backend claim.
   if (target?.claudeCodePreview && !runtimeAccepts(await conversationExecutionState(target))) {
     retryQueuedTurn(userId, sessionId)
@@ -104,6 +103,15 @@ export async function startQueuedTurn(userId: string, sessionId: string): Promis
 
   try {
     const queue = await listPendingUserMessages(userId, sessionId)
+    const next = queueHead(queue, userId)[0]
+
+    // A teammate's send to a shared computer waits for its owner: their answer starts it.
+    if (
+      target &&
+      next?.chat &&
+      (await awaitsShareApproval(target, next.actorUserId ?? target.userId))
+    )
+      return
 
     // A send never waits for a Box: the queue does, while it resumes in the background.
     if (queue.length > 0 && (await wakeOfflineBox(target?.runtimeId))) {

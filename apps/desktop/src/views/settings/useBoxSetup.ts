@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { toast } from '../../components/ui/toast'
 import { RUNTIME_INSTANCES_CHANGED, useRuntimeInstances } from '../../hooks/useRuntimeInstances'
+import { t } from '../../i18n'
 
 import { openBoxPaywall } from './boxPaywallStore'
 import { BOX_CREATING_POLL_MS, boxAgents, boxSetupPhase } from './boxPresentation'
@@ -29,6 +30,8 @@ export function useBoxSetup(
   const devices = deviceId ? (list?.devices ?? null) : null
   const phase = boxSetupPhase(deviceId, devices, agents)
   const joined = devices?.some((device) => device.deviceId === deviceId && device.online)
+  // The names already taken, for the next Box's default name.
+  const labels = (list?.devices ?? []).map((device) => device.label)
 
   // The team's list refreshes every 10 s on its own; ask now once the Box's agent connects.
   useEffect(() => {
@@ -43,11 +46,11 @@ export function useBoxSetup(
     } catch (error) {
       // No plan, or past it: the paywall offers one, then makes the Box.
       if (!openBoxPaywall(teamId, error, () => void create(label)))
-        toast.apiError('Could not create Box', error)
+        toast.apiError(t('Could not create computer'), error)
     } finally {
       setCreating(false)
     }
   }
 
-  return { phase, agents, creating, create }
+  return { phase, agents, labels, creating, create }
 }

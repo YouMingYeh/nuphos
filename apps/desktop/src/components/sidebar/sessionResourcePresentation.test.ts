@@ -2,12 +2,21 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  changeStatus,
   chipNames,
+  finishedBreakdown,
+  finishedFilter,
+  finishedLabel,
+  finishedTooltip,
   fittingChipCount,
   minimumRowWidth,
+  overflowLabel,
+  pullStateColor,
   resourceChips,
   resourceFullLabel,
   resourceLabel,
+  resourceMark,
+  resourceStatus,
 } from './sessionResourcePresentation.ts'
 
 import type { SessionResource } from '../../api/session-resource-types'
@@ -114,4 +123,190 @@ test('two PRs and five terminals fold from the end as the titlebar narrows', () 
   // Then the PRs: #630 +2, and at the row's minimum, +3 alone.
   assert.equal(shown(119), 1)
   assert.equal(shown(minimumRowWidth(widths, 24)), 0)
+})
+
+test('an open PR says what holds it up; merged, closed and unblocked PRs say their state', () => {
+  assert.equal(resourceStatus(resource({ health: 'checks_failed' })), 'open · checks failing')
+  assert.equal(
+    resourceStatus(resource({ health: 'changes_requested' })),
+    'open · changes requested',
+  )
+  assert.equal(resourceStatus(resource({ health: 'conflict' })), 'open · merge conflict')
+  assert.equal(resourceStatus(resource({ health: null })), 'open')
+  assert.equal(resourceStatus(resource({})), 'open')
+  // A stale health never outlives the merge.
+  assert.equal(resourceStatus(resource({ state: 'merged', health: 'conflict' })), 'merged')
+})
+
+test('a PR tag keeps its GitHub state color whatever holds it up', () => {
+  for (const health of [undefined, null, 'checks_failed', 'changes_requested', 'conflict'] as const)
+    assert.equal(pullStateColor(resource({ health })), 'session-resource-open')
+  assert.equal(pullStateColor(resource({ state: 'merged' })), 'session-resource-merged')
+  assert.equal(pullStateColor(resource({ state: 'closed' })), 'session-resource-closed')
+})
+
+test('an open PR shows a separate mark for failing checks, requested changes or a conflict', () => {
+  assert.deepEqual(resourceMark(resource({ health: 'checks_failed' })), {
+    glyph: 'cross',
+    color: 'session-resource-failing',
+  })
+  assert.deepEqual(resourceMark(resource({ health: 'changes_requested' })), {
+    glyph: 'dot',
+    color: 'session-resource-pending',
+  })
+  assert.deepEqual(resourceMark(resource({ health: 'conflict' })), {
+    glyph: 'conflict',
+    color: 'session-resource-pending',
+  })
+})
+
+test('an unblocked, merged or closed PR, or a Linear issue, has no mark', () => {
+  assert.equal(resourceMark(resource({})), null)
+  assert.equal(resourceMark(resource({ health: null })), null)
+  assert.equal(resourceMark(resource({ state: 'merged', health: 'checks_failed' })), null)
+  assert.equal(resourceMark(resource({ state: 'closed', health: 'conflict' })), null)
+  assert.equal(resourceMark(resource({ provider: 'linear', health: 'conflict' })), null)
+})
+
+test('a change is open, merged or closed, a completed issue counting as merged', () => {
+  assert.equal(changeStatus(resource({ state: 'open' })), 'open')
+  assert.equal(changeStatus(resource({ state: 'merged' })), 'merged')
+  assert.equal(changeStatus(resource({ state: 'closed' })), 'closed')
+  assert.equal(
+    changeStatus(resource({ provider: 'linear', state: 'Done', stateType: 'completed' })),
+    'merged',
+  )
+  assert.equal(
+    changeStatus(resource({ provider: 'linear', state: 'Canceled', stateType: 'canceled' })),
+    'closed',
+  )
+  assert.equal(
+    changeStatus(resource({ provider: 'linear', state: 'In Progress', stateType: 'started' })),
+    'open',
+  )
+  assert.equal(changeStatus(resource({ provider: 'slack', state: 'linked' })), 'open')
+})
+
+const merged = (id: string, number: number) =>
+  resource({ id, number, state: 'merged', title: `Merged ${String(number)}` })
+
+test('the badge counts what its Changes pill counts: merged first, else closed', () => {
+  const done = resource({ id: 'l1', provider: 'linear', title: 'ENG-1 x', stateType: 'completed' })
+  const canceled = resource({
+    id: 'l2',
+    provider: 'linear',
+    title: 'ENG-2 x',
+    stateType: 'canceled',
+  })
+  const closed = resource({ id: 'c1', state: 'closed' })
+
+  assert.equal(finishedLabel([merged('m1', 1), merged('m2', 2)]), '2 merged')
+  assert.equal(finishedLabel([merged('m1', 1), closed, done]), '2 merged')
+  assert.equal(finishedLabel([done, canceled]), '1 done')
+  assert.equal(finishedLabel([closed, canceled]), '2 closed')
+})
+
+test('the badge tooltip breaks the items down, most common first, then names them', () => {
+  const items = [
+    resource({ id: 'l1', provider: 'linear', title: 'ENG-1 Ship it', stateType: 'completed' }),
+    resource({ id: 'c1', number: 9, state: 'closed', title: 'Old idea' }),
+    merged('m1', 56),
+    merged('m2', 58),
+    resource({ id: 'l2', provider: 'linear', title: 'ENG-2 Drop', stateType: 'canceled' }),
+  ]
+
+  assert.equal(finishedBreakdown(items), '2 merged, 1 done, 1 closed, 1 canceled')
+  assert.equal(finishedBreakdown(items, 'ja'), '2 merged、1 done、1 closed、1 canceled')
+  assert.equal(
+    finishedTooltip(items),
+    [
+      '2 merged, 1 done, 1 closed, 1 canceled',
+      'ENG-1 Ship it',
+      '#9 Old idea',
+      '#56 Merged 56',
+      '#58 Merged 58',
+      'ENG-2 Drop',
+    ].join('\n'),
+  )
+})
+
+test('the badge opens Merged when it holds anything merged, else Closed', () => {
+  assert.equal(finishedFilter([merged('m1', 1), resource({ state: 'closed' })]), 'merged')
+  assert.equal(
+    finishedFilter([resource({ provider: 'linear', title: 'ENG-1 x', stateType: 'completed' })]),
+    'merged',
+  )
+  assert.equal(
+    finishedFilter([
+      resource({ state: 'closed' }),
+      resource({ provider: 'linear', title: 'ENG-2 x', stateType: 'canceled' }),
+    ]),
+    'closed',
+  )
+})
+
+test('finished PRs and issues fold into one badge after the open chips and terminals', () => {
+  const chips = resourceChips(
+    [
+      merged('m1', 56),
+      resource({ id: 'o1', number: 7 }),
+      resource({ id: 'c1', number: 9, state: 'closed' }),
+      resource({ id: 'l1', provider: 'linear', title: 'ENG-1 Done', stateType: 'completed' }),
+      resource({ id: 'l2', provider: 'linear', title: 'ENG-2 Doing', stateType: 'started' }),
+    ],
+    [{ tabId: 't1', name: 'dev' }],
+  )
+
+  assert.deepEqual(
+    chips.map((chip) => chip.key),
+    ['o1', 'l2', 't1', 'finished'],
+  )
+  const badge = chips[3]
+
+  assert.equal(badge.kind, 'finished')
+  assert.deepEqual(badge.kind === 'finished' && badge.resources.map((item) => item.id), [
+    'm1',
+    'c1',
+    'l1',
+  ])
+})
+
+test('a session with only finished links shows only the badge, and none without them', () => {
+  assert.deepEqual(
+    resourceChips([merged('m1', 1), merged('m2', 2)], []).map((chip) => chip.kind),
+    ['finished'],
+  )
+  assert.deepEqual(
+    resourceChips([resource({ id: 'o1' })], []).map((chip) => chip.kind),
+    ['resource'],
+  )
+})
+
+test('the badge names every item it holds', () => {
+  assert.deepEqual(chipNames(resourceChips([merged('m1', 56), merged('m2', 58)], [])), [
+    '#56 Merged 56',
+    '#58 Merged 58',
+  ])
+})
+
+test('on a narrow row the badge, last in the row, folds into +N first', () => {
+  // Two open PRs, a terminal and the badge; the badge is the widest.
+  const widths = [40, 40, 50, 70]
+
+  assert.equal(fittingChipCount(widths, 212, 4, 24), 4)
+  assert.equal(fittingChipCount(widths, 180, 4, 24), 3)
+  assert.equal(fittingChipCount([70], 40, 4, 24), 1)
+})
+
+test('the +N label names what it folds, the badge by its own label', () => {
+  const terminals = ['a', 'b'].map((name) => ({ tabId: name, name }))
+  const chips = resourceChips(
+    [resource({ id: 'o1' }), resource({ id: 'o2' }), merged('m1', 1), merged('m2', 2)],
+    terminals,
+  )
+
+  assert.equal(overflowLabel(chips.slice(1)), '3 more linked resources and 2 merged, show all')
+  assert.equal(overflowLabel(chips.slice(3)), '2 merged, show all')
+  assert.equal(overflowLabel(chips.slice(1, 2)), '1 more linked resource, show all')
+  assert.equal(overflowLabel([chips[1], chips[3]]), '1 more linked resource and 2 merged, show all')
 })

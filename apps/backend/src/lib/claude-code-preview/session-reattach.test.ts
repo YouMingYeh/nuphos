@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 
 import { registry, sessionsByConversation } from './agent-chat-registry'
-import { observeSession, reattachAfterTransportLoss } from './session-reattach'
+import { observeSession, reattachAfterTransportLoss, untilOnline } from './session-reattach'
 
 import type { TeamPreviewClient, TeamSession } from './team-openab-runtime'
 
+import { localRuntimeUrl } from '@/lib/agent/devices/local-runtime/address'
+import { tunnelBus } from '@/lib/agent/devices/local-runtime/bus'
+import { runtimePresenceStore } from '@/lib/agent/devices/local-runtime/presence'
+import { holderChannel } from '@/lib/agent/devices/local-runtime/protocol'
+import * as lifecycle from '@/lib/lifecycle'
 import { useAgentDb } from '@/lib/test/doubles/agent-db'
+import { useRedis } from '@/lib/test/doubles/redis'
 
 const endpoint = {
   url: 'wss://runtime.invalid/acp',
@@ -17,6 +23,19 @@ let attachment: { openabSessionId: string; runtimeUrl: string; forceNew?: boolea
 let attachmentError: Error | null = null
 let attachmentErrorOnce = false
 let workLost: string | null = null
+const handoffs = new Map<string, string>()
+
+useRedis({
+  withRedis: (op) =>
+    op({
+      hset: async (_key: string, fields: Record<string, string>) => {
+        for (const [field, value] of Object.entries(fields)) handoffs.set(field, value)
+
+        return Object.keys(fields).length
+      },
+      del: async () => 0,
+    } as never),
+})
 
 useAgentDb({
   getConversationPreviewAttachment: async () => {
@@ -67,6 +86,7 @@ const instant = async () => undefined
 
 beforeEach(() => {
   workLost = null
+  handoffs.clear()
   attachmentError = null
   attachmentErrorOnce = false
   attachment = { openabSessionId: 'sess-1', runtimeUrl: endpoint.url }
@@ -167,25 +187,67 @@ test('a runtime that stays unreachable is reported as lost contact, not certain 
 test('a blip the next attempt recovers from reports nothing', async () => {
   // The session is back on the air, so there is nothing to warn about and no
   // reason to invite a re-run of work that may still be running.
+  const error = spyOn(console, 'error').mockImplementation(() => {})
+  const warn = spyOn(console, 'warn').mockImplementation(() => {})
+
   acquire = spyOn(registry, 'acquire')
     .mockRejectedValueOnce(new Error('Failed to connect'))
     .mockResolvedValue(fakeClient('replacement'))
 
-  expect(await reattachAfterTransportLoss(session, session.client, [0, 0], instant)).toBe(true)
-  expect(workLost).toBeNull()
+  try {
+    expect(await reattachAfterTransportLoss(session, session.client, [0, 0], instant)).toBe(true)
+    expect(workLost).toBeNull()
+    expect(error).not.toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
+  } finally {
+    error.mockRestore()
+    warn.mockRestore()
+  }
 })
 
-test('giving up because the session was superseded still reports the failures seen', async () => {
-  // Attempt 1 cannot connect; by attempt 2 the session has moved on, so the
-  // loop stops without ever resuming. The failure already seen still counts.
+test('an offline computer logs no error per retry, and one warning when reattach gives up', async () => {
+  // A computer going offline is expected; every retry failing must not flood
+  // the error log the backend error-volume alert watches.
+  const error = spyOn(console, 'error').mockImplementation(() => {})
+  const warn = spyOn(console, 'warn').mockImplementation(() => {})
+
+  acquire = spyOn(registry, 'acquire').mockRejectedValue(
+    new Error('The computer running this agent is offline'),
+  )
+
+  try {
+    expect(await reattachAfterTransportLoss(session, session.client, [0, 0, 0], instant)).toBe(
+      false,
+    )
+    expect(acquire).toHaveBeenCalledTimes(3)
+    expect(error).not.toHaveBeenCalled()
+    expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+      expect.objectContaining({ event: 'agent.openab_session.reattach_failed', attempts: 3 }),
+    ])
+  } finally {
+    error.mockRestore()
+    warn.mockRestore()
+  }
+})
+
+test('a reattach that finds the session moved on writes nothing, even after failures', async () => {
+  // Attempt 1 cannot connect; by attempt 2 the conversation uses another
+  // runtime session. That session's holder owns its story now.
+  const warn = spyOn(console, 'warn').mockImplementation(() => {})
+
   acquire = spyOn(registry, 'acquire').mockImplementationOnce(async () => {
     attachment = { openabSessionId: 'sess-2', runtimeUrl: endpoint.url }
     throw new Error('Failed to connect')
   })
 
-  expect(await reattachAfterTransportLoss(session, session.client, [0, 0], instant)).toBe(false)
-  expect(acquire).toHaveBeenCalledTimes(1)
-  expect(workLost).toBe('unreachable')
+  try {
+    expect(await reattachAfterTransportLoss(session, session.client, [0, 0], instant)).toBe(false)
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(workLost).toBeNull()
+    expect(warn).not.toHaveBeenCalled()
+  } finally {
+    warn.mockRestore()
+  }
 })
 
 test('a handoff with no runtime failure behind it reports nothing', async () => {
@@ -234,4 +296,126 @@ test('a replacement closing during resume does not start a second reattach loop'
   expect(await reattachAfterTransportLoss(session, session.client, [0, 0], instant)).toBe(true)
   expect(acquire).toHaveBeenCalledTimes(2)
   expect(session.client).toBe(healthy)
+})
+
+// A rollout drains the replica that runs a turn while the device tunnel drops.
+// The runtime keeps the turn going and waits 30 s for an output connection
+// before cancelling its tool permission requests, so the session must reach a
+// live replica now, not when the drain ends minutes later.
+test('a draining replica hands a lost session on at once instead of dropping it', async () => {
+  const draining = spyOn(lifecycle, 'isShuttingDown').mockReturnValue(true)
+
+  acquire = spyOn(registry, 'acquire').mockResolvedValue(fakeClient('replacement'))
+  try {
+    observeSession(session)
+    ;(session.client as ReturnType<typeof fakeClient>).close()
+    expect(await session.reattached).toBe(false)
+  } finally {
+    draining.mockRestore()
+  }
+
+  expect(acquire).not.toHaveBeenCalled()
+  expect(JSON.parse(handoffs.get('team:conv') ?? 'null')).toMatchObject({
+    teamId: 'team',
+    conversationId: 'conv',
+    ownerUserId: 'user',
+    actorUserId: 'user',
+  })
+  expect(workLost).toBeNull()
+})
+
+test('a draining replica does not hand on a session that moved elsewhere', async () => {
+  const draining = spyOn(lifecycle, 'isShuttingDown').mockReturnValue(true)
+
+  attachment = { openabSessionId: 'sess-1', runtimeUrl: 'wss://elsewhere.invalid/acp' }
+  acquire = spyOn(registry, 'acquire')
+  try {
+    expect(await reattachAfterTransportLoss(session, session.client, [0], instant)).toBe(false)
+  } finally {
+    draining.mockRestore()
+  }
+
+  expect(handoffs.size).toBe(0)
+})
+
+const computer = { userId: 'owner', deviceId: 'laptop', provider: 'claude-code' as const }
+const heartbeat = () =>
+  tunnelBus().publish(
+    holderChannel(computer.userId, computer.deviceId),
+    JSON.stringify({ t: 'ping', conn: 'tunnel-2' }),
+  )
+
+test('a computer that comes back after any outage gets its session back on its own', async () => {
+  // Every attempt while the computer is offline used to spend a retry, so an
+  // outage longer than the retry window left the session off the air until
+  // someone reopened the chat. Attempts now wait for the computer instead.
+  const url = localRuntimeUrl(computer, 'team')
+  const replacement = fakeClient('replacement')
+
+  session.endpoint = { ...endpoint, url }
+  attachment = { openabSessionId: 'sess-1', runtimeUrl: url }
+  acquire = spyOn(registry, 'acquire')
+    .mockRejectedValueOnce(new Error('The computer running this agent is offline'))
+    .mockResolvedValue(replacement)
+
+  const reattached = reattachAfterTransportLoss(session, session.client, [0, 1, 1])
+
+  await Bun.sleep(30)
+  expect(acquire).toHaveBeenCalledTimes(1)
+  expect(workLost).toBeNull()
+
+  await heartbeat()
+  expect(await reattached).toBe(true)
+  expect(session.client).toBe(replacement)
+  expect(workLost).toBeNull()
+})
+
+test('untilOnline returns at once for a cloud runtime or a computer whose tunnel is open', async () => {
+  await untilOnline(endpoint.url)
+  // A tunnel claims the computer, then its first report marks it seen.
+  await runtimePresenceStore().claim(computer.userId, computer.deviceId, 'c')
+  await runtimePresenceStore().put(computer.userId, computer.deviceId, {
+    conn: 'c',
+    seenAt: Date.now(),
+  })
+  try {
+    await untilOnline(localRuntimeUrl(computer, 'team'))
+  } finally {
+    await runtimePresenceStore().clear(computer.userId, computer.deviceId, 'c')
+  }
+  acquire = spyOn(registry, 'acquire')
+})
+
+test('a stale waiter that wakes after a newer reattach succeeded changes nothing', async () => {
+  // The waiter for an offline computer can sleep for hours. A newer reattach
+  // (or a turn) put the session on a live transport meanwhile; the old waiter
+  // wakes at the computer's heartbeat and must leave everything as it is.
+  const url = localRuntimeUrl(computer, 'team')
+  const lost = fakeClient('lost')
+  const newer = fakeClient('newer')
+  const warn = spyOn(console, 'warn').mockImplementation(() => {})
+
+  session.endpoint = { ...endpoint, url }
+  session.client = lost
+  attachment = { openabSessionId: 'sess-1', runtimeUrl: url }
+  acquire = spyOn(registry, 'acquire').mockRejectedValue(
+    new Error('The computer running this agent is offline'),
+  )
+
+  try {
+    const stale = reattachAfterTransportLoss(session, lost, [0, 1, 1])
+
+    await Bun.sleep(30)
+    session.client = newer
+    await heartbeat()
+
+    expect(await stale).toBe(false)
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(session.client).toBe(newer)
+    expect(newer.loads).toEqual([])
+    expect(workLost).toBeNull()
+    expect(warn).not.toHaveBeenCalled()
+  } finally {
+    warn.mockRestore()
+  }
 })

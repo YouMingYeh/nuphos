@@ -9,8 +9,10 @@
 import { parseDashboardViewRange } from '../dashboards/view/range.ts'
 
 import { kubernetesNavigation } from './app-routes/clusterParse.ts'
+import { architectureDetailOf, designDetailOf } from './app-routes/detailParse.ts'
 import { linearNavigation } from './app-routes/linearParse.ts'
 import {
+  agentSession,
   emptyNavigation,
   githubInstallationFromId,
   githubRepositoryFromPath,
@@ -108,9 +110,8 @@ export function navigationFromAppPath(path: string): NavigationSnapshot | null {
       if (rest[1] === 'skills') {
         return emptyNavigation(teamScope, 'team.agent-skills', rest[2] ? { filter: rest[2] } : {})
       }
-      if (rest[1]) return emptyNavigation(teamScope, 'team.agent', { agentSessionId: rest[1] })
 
-      return emptyNavigation(teamScope, 'team.agent')
+      return emptyNavigation(teamScope, 'team.agent', rest[1] ? agentSession(rest[1], query) : {})
     }
     case 'plans':
       return emptyNavigation(teamScope, 'team.plans', rest[1] ? { filter: rest[1] } : {})
@@ -127,6 +128,8 @@ export function navigationFromAppPath(path: string): NavigationSnapshot | null {
       return emptyNavigation(teamScope, 'team.audit')
     case 'files':
       return emptyNavigation(teamScope, 'team.files', { filter: query.get('path') || undefined })
+    case 'artifacts':
+      return emptyNavigation(teamScope, 'team.artifact', { filter: rest[1] })
     case 'terminal':
       return emptyNavigation(teamScope, 'team.terminal', rest[1] ? { filter: rest[1] } : {})
     case 'desktop':
@@ -145,11 +148,9 @@ export function navigationFromAppPath(path: string): NavigationSnapshot | null {
     case 'schedule':
       return emptyNavigation(teamScope, 'team.schedule')
     case 'architecture':
-      return emptyNavigation(
-        teamScope,
-        'team.architecture',
-        rest[1] ? { architectureDetail: { diagramId: rest[1], diagramName: 'Diagram' } } : {},
-      )
+      return emptyNavigation(teamScope, 'team.architecture', architectureDetailOf(rest[1]))
+    case 'designs':
+      return emptyNavigation(teamScope, 'team.designs', designDetailOf(rest[1]))
     // Legacy: the Dashboards page was called Cost Management.
     case 'cost-management':
     case 'dashboards':

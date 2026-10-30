@@ -1,11 +1,11 @@
 import { Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 
-import { config } from '@/config'
 import { AppError } from '@/lib/errors'
 import { authenticateToken } from '@/lib/identity/auth'
 import { exchangeSocialCode, providerSettings, signInSocial } from '@/lib/identity/social'
 import { socialAuthAttempts as attempts } from '@/lib/identity/social-store'
+import { startSession } from '@/lib/identity/start-session'
 import {
   abandonNativeSession,
   completeNativeSession,
@@ -126,12 +126,14 @@ socialAuth.on(['GET', 'POST'], '/:provider/callback', async (c) => {
 
       return c.redirect(target.toString())
     }
-    setCookie(c, '__Host-nuphos-social', identity.token, {
+    const session = await startSession(c, identity.user)
+
+    setCookie(c, '__Host-nuphos-social', session.token, {
       httpOnly: true,
       secure: true,
       sameSite: 'Lax',
       path: '/',
-      maxAge: config.auth.sessionTtlSec,
+      maxAge: 30 * 24 * 60 * 60,
     })
 
     return c.html(

@@ -75,6 +75,14 @@ export const deviceApi = {
     teamId: string,
     access: { everyone: boolean; userIds: string[] },
   ) => ipcRenderer.invoke('box:setAccess', deviceId, teamId, access),
+  localShareGet: (deviceId: string, teamId: string) =>
+    ipcRenderer.invoke('localShare:get', deviceId, teamId),
+  localShareSet: (deviceId: string, teamId: string, input: unknown) =>
+    ipcRenderer.invoke('localShare:set', deviceId, teamId, input),
+  localShareApprovals: (teamId: string) => ipcRenderer.invoke('localShare:approvals', teamId),
+  localShareStatus: (sessionId: string) => ipcRenderer.invoke('localShare:status', sessionId),
+  localShareDecide: (approvalId: string, approve: boolean) =>
+    ipcRenderer.invoke('localShare:decide', approvalId, approve),
   boxUsage: (teamId: string) => ipcRenderer.invoke('box:usage', teamId),
   boxUsageHistory: (teamId: string, range: string) =>
     ipcRenderer.invoke('box:usageHistory', teamId, range),

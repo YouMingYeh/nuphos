@@ -3,7 +3,9 @@ package ai.nuphos.android.ui.agent
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -23,16 +25,17 @@ import ai.nuphos.android.session.RuntimeSelections
 fun AgentChip(selection: RuntimeSelections.Selection?, enabled: Boolean, onClick: () -> Unit, labelOverride: String? = null, modifier: Modifier = Modifier) {
     val selected = selection?.selected
     val label = labelOverride ?: when {
-        selection?.reselectionRequired == true -> "Choose an available Agent"
+        selection?.reselectionRequired == true -> "Choose an available runtime"
         selected != null -> selected.label
-        else -> "Choose an Agent"
+        else -> "Choose runtime"
     }
     TextButton(
-        modifier = modifier,
+        modifier = modifier.semantics { contentDescription = if (labelOverride == null) "Runtime for new agents: $label" else "Runtime for this agent: $label" },
         enabled = enabled,
         onClick = onClick,
     ) {
-        Icon(Icons.Outlined.AutoAwesome, contentDescription = if (labelOverride == null) "Agent for new chats" else "Conversation Agent", modifier = Modifier.size(16.dp))
+        if (selected != null) ai.nuphos.android.ui.components.RuntimeMark(selected.provider, 16.dp)
+        else Icon(Icons.Outlined.Memory, contentDescription = null, modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(6.dp))
         Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false).widthIn(max = 160.dp))

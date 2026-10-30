@@ -21,10 +21,17 @@ struct ConversationView: View {
     @Environment(AgentStore.self) private var store
     @State private var archiveError: String?
     @State private var updating = false
+    @State private var width: CGFloat = 0
+    #if os(iOS)
+    @Environment(\.barButtonsInSideRail) private var barButtonsInSideRail
+    #else
+    private let barButtonsInSideRail = false
+    #endif
     @State private var showRename = false
     @State private var renamedTitle = ""
     @State private var showRuntimes = false
     @State private var showShare = false
+    @State private var referencedAgents = ReferencedAgents()
 
     private var rows: [ChatRow] { ChatRow.rows(for: session) }
 
@@ -38,7 +45,7 @@ struct ConversationView: View {
         if !session.loaded || session.awaitingReplay {
             ProgressView().tint(Theme.muted)
         } else if let loadError = session.loadError {
-            ContentUnavailableView("Couldn't load this chat", systemImage: "exclamationmark.bubble", description: Text(loadError))
+            ContentUnavailableView("Couldn't load this agent", systemImage: "exclamationmark.bubble", description: Text(loadError))
         }
     }
 
@@ -55,6 +62,7 @@ struct ConversationView: View {
             #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .background(Theme.chatCanvas)
         .safeAreaInset(edge: .top, spacing: 0) {
             if !session.resources.isEmpty { ResourceStrip(resources: session.resources) }
@@ -76,15 +84,9 @@ struct ConversationView: View {
             UIEventLog.pageTransition(from: "chat", to: sourcePage)
             onScreen = false
             updateReading()
-            #if canImport(UIKit)
-            // UIKit gives the list back the focus it had when this chat opened,
-            // raising a keyboard over a composer it does not lift. Only a chat
-            // that has really gone runs this; a cancelled back swipe does not.
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-            #endif
         }
         .onChange(of: scenePhase) { _, _ in updateReading() }
-        .alert("Rename chat", isPresented: $showRename) {
+        .alert("Rename agent", isPresented: $showRename) {
             TextField("Title", text: $renamedTitle)
             Button("Cancel", role: .cancel) {}
             Button("Save") {
@@ -130,20 +132,23 @@ struct ConversationView: View {
                             Button("Rename", systemImage: "pencil") { renamedTitle = session.title; showRename = true }
                         }
                         if session.canManage {
-                            Button("Switch agent", systemImage: "arrow.left.arrow.right") { showRuntimes = true }
+                            Button("Switch runtime", systemImage: "arrow.left.arrow.right") { showRuntimes = true }
                                 .disabled(session.isStreaming)
                             Button {
+                                // An archived chat leaves the list, so go
+                                // back to it at once and archive from there,
+                                // as a swipe does; a restored one rejoins it.
+                                if !session.isArchived {
+                                    dismiss()
+                                    Task { await store.archive(sessionId: session.sessionId, teamId: session.teamId) }
+                                    return
+                                }
                                 Task {
                                     updating = true
                                     defer { updating = false }
                                     do {
-                                        try await session.setArchived(!session.isArchived)
-                                        store.removeFromList(session.sessionId)
-                                        // Either direction takes the chat out
-                                        // of the list it was opened from, so
-                                        // stay there rather than on a chat
-                                        // that no longer belongs.
-                                        dismiss()
+                                        try await session.setArchived(false)
+                                        await store.reload()
                                     } catch { archiveError = error.localizedDescription }
                                 }
                             } label: {
@@ -151,24 +156,23 @@ struct ConversationView: View {
                             }
                         }
                     } label: {
-                        // The menu has closed by the time the request runs;
-                        // this is what shows it was taken. A Label, not a bare
-                        // Image: the bar takes it as a native item, so the
-                        // whole glass answers, not just the glyph.
-                        if updating { ProgressView() } else { Label("Chat options", systemImage: "ellipsis") }
+                        // A Label, not a bare Image: the bar takes it as a
+                        // native item, so the whole glass answers, not just
+                        // the glyph.
+                        Label("Agent options", systemImage: "ellipsis")
                     }
                     .disabled(updating)
-                    .accessibilityLabel("Chat options")
+                    .accessibilityLabel("Agent options")
                 }
             }
         }
-        .alert("Couldn't update chat", isPresented: Binding(get: { archiveError != nil }, set: { if !$0 { archiveError = nil } })) {
+        .alert("Couldn't update agent", isPresented: Binding(get: { archiveError != nil }, set: { if !$0 { archiveError = nil } })) {
             Button("OK") { archiveError = nil }
         } message: {
             Text(archiveError ?? "")
         }
         .sheet(item: $toolDetail) { ToolDetailSheet(part: $0) }
-        .sheet(isPresented: $showShare) { ShareSessionSheet(session: session) }
+        .sheet(isPresented: $showShare) { ShareSessionSheet(session: session).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showRuntimes) {
             RuntimePickerSheet(session: session) { runtime in
                 Task {
@@ -180,27 +184,12 @@ struct ConversationView: View {
             }
         }
         .sheet(item: $planLink) { target in
-            NavigationStack {
-                PlanDetailView(
-                    planId: target.planId,
-                    teamId: target.teamId,
-                    approve: { plan in try await session.approvePlan(plan.id) },
-                    showsChatActions: false
-                )
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") { planLink = nil }
-                    }
-                }
-            }
-            .presentationDetents([.large])
+            PlanLinkSheet(target: target, approve: { plan in try await session.approvePlan(plan.id) }) { planLink = nil }
         }
         .task {
             if session.isNew, let initialPrompt, !didSendInitial {
                 didSendInitial = true
                 session.send(initialPrompt)
-            } else if !session.loaded {
-                await session.load()
             }
             #if DEBUG
             // `-approve-plan <id>`: exercise the approval round-trip.
@@ -210,67 +199,94 @@ struct ConversationView: View {
             }
             #endif
         }
-        .task { await session.pollWhileIdle() }
+        // SwiftUI cancels this when the chat leaves the screen; the stream
+        // lives on the session, so close it here.
+        .task {
+            await session.pollWhileIdle()
+            session.leave()
+        }
+        // A teammate's computer that asks its owner first: say so until they answer.
+        .task(id: "\(ShareApprovalWait.asksOwner(conversationRuntime)).\(session.queuedSends)") {
+            await store.loadRuntimes()
+            guard ShareApprovalWait.asksOwner(conversationRuntime) else { return }
+            while !Task.isCancelled, await session.refreshShareApproval() {
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
         // New files land while a turn runs; read them once it settles.
         .task(id: "\(session.isStreaming).\(session.messages.count)") {
             await session.refreshResources()
             if !session.isStreaming { await session.refreshDownloads() }
-        }
-        .task {
-            while !Task.isCancelled {
-                session.tickRuntimeClock()
-                try? await Task.sleep(for: .seconds(1))
-            }
         }
     }
 
     /// The conversation's title, with the agent that answers in it on a
     /// second, quieter line — where the composer's runtime chip used to be.
     private var titleBar: some View {
-        VStack(spacing: 1) {
-            Text(session.title)
-                .font(Theme.Text.label.weight(.semibold))
-                .foregroundStyle(Theme.heading)
-                .lineLimit(1)
-            if let name = session.runtimeDisplayName {
-                HStack(spacing: 4) {
-                    RuntimeMark(runtime: session.isNativeRuntime ? session.agentRuntime : nil)
+        HStack(spacing: 8) {
+            AgentAvatar(agentId: session.sessionId, runtime: session.agentRuntime)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(session.title)
+                    .font(Theme.Text.label.weight(.semibold))
+                    .foregroundStyle(Theme.heading)
+                    .lineLimit(1)
+                if let name = session.runtimeDisplayName {
                     Text(name)
                         .font(Theme.Text.micro)
                         .foregroundStyle(Theme.muted)
                         .lineLimit(1)
+                        .accessibilityLabel("Runtime: \(name)")
+                } else if !session.loaded {
+                    Text(" ").font(Theme.Text.micro).accessibilityHidden(true)
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Runtime: \(name)")
-            } else if !session.loaded {
-                // A chat opened without the list's copy of the runtime — from
-                // a plan, say — holds the line rather than growing into it
-                // once the detail lands.
-                Text(" ").font(Theme.Text.micro).accessibilityHidden(true)
             }
         }
+        // The principal item is only as wide as its content and centred, so
+        // it is given all the room between the back and options buttons
+        // (each 44 + 16 margin + 8 gap) to start the title on the left. On
+        // iPhone Duo those buttons sit in the side rail, so the title gets
+        // the whole bar.
+        .frame(width: max(width - (barButtonsInSideRail ? 0 : 136), 0), alignment: .leading)
     }
 
-    /// Plan links open the plan here and session links open that chat the
-    /// way a tapped notification does; everything else leaves the app.
+    /// Plan links open the plan here, approved through this chat; other app
+    /// pages open the way a link from outside does; everything else leaves.
     private func open(link url: URL) {
-        if let target = PlanLink.target(in: url) {
-            planLink = target
-        } else if let link = SessionLink.target(in: url) {
-            guard link.sessionId != session.sessionId else { return }
-            PushNotifications.shared.pendingTarget = PushTarget(teamId: link.teamId, sessionId: link.sessionId)
-        } else {
-            openURL(url)
+        switch AppLink(url) {
+        case .plan(let target): planLink = target
+        case .session(_, session.sessionId): break
+        default: if !PushNotifications.shared.open(url) { openURL(url) }
         }
     }
 
-    /// The composer, with any queued messages above it.
+    /// The agent this conversation runs on, when the catalog lists it.
+    private var conversationRuntime: RuntimeInstance? {
+        let id = session.runtimeId ?? session.runtime?.id
+        return store.runtimes.first { $0.id == id }
+    }
+
+    /// The composer, with what waits on the owner of a shared computer and any queued messages above it.
     private var composer: some View {
         VStack(spacing: 0) {
-            if !session.queued.isEmpty {
+            if let wait = session.shareApproval, ShareApprovalWait.asksOwner(conversationRuntime) {
+                ShareApprovalStrip(
+                    wait: wait,
+                    computer: conversationRuntime?.local?.deviceLabel ?? "this computer"
+                )
+            }
+            if !session.queued.isEmpty || !session.serverQueued.isEmpty {
                 QueuedStrip(
-                    items: session.queued,
-                    onRemove: { session.removeQueued(at: $0) }
+                    items: session.queued.enumerated().map { .init(id: "local.\($0.offset)", text: $0.element, steering: false) }
+                        + session.serverQueued.map { .init(id: $0.id, text: $0.text, steering: session.steeringQueued.contains($0.id)) },
+                    canSteer: session.canSteer,
+                    onEdit: { id in
+                        Task {
+                            guard let text = await takeBack(id) else { return }
+                            draft = [draft, text].filter { !$0.isEmpty }.joined(separator: "\n\n")
+                        }
+                    },
+                    onSteer: { id in Task { await session.steerQueued(id) } },
+                    onRemove: { id in Task { _ = await takeBack(id) } }
                 )
             }
             ChatComposerBar(
@@ -278,7 +294,8 @@ struct ConversationView: View {
                 isStreaming: session.isStreaming,
                 canSend: session.canSubmit,
                 canStop: session.canCancel,
-                sendsDuringTurn: session.isNativeRuntime,
+                // While the agent cannot take a message, the button queues it.
+                sendsDuringTurn: session.isNativeRuntime && !session.sendQueues,
                 canSteer: session.canSteer,
                 allowsAttachments: !session.canSteer,
                 failedSubmission: $session.failedSubmission,
@@ -295,6 +312,7 @@ struct ConversationView: View {
                         return await store.mentionableSessions(teamId: session.teamId, excluding: session.sessionId, matching: query)
                     }
                 ),
+                voiceTeamId: session.teamId,
                 onSend: { session.send($0) },
                 onStop: { session.stop() }
             ) {
@@ -308,6 +326,17 @@ struct ConversationView: View {
                 ) }
             }
         }
+    }
+
+    /// Takes a queued message back; its text, unless its turn already started.
+    private func takeBack(_ id: String) async -> String? {
+        if id.hasPrefix("local."), let index = Int(id.dropFirst(6)), session.queued.indices.contains(index) {
+            let text = session.queued[index]
+            session.removeQueued(at: index)
+            return text
+        }
+        let text = session.serverQueued.first { $0.id == id }?.text
+        return await session.unqueue(id) ? text : nil
     }
 
     /// UIKit owns the iOS transcript's layout and reading position.
@@ -367,12 +396,16 @@ struct ConversationView: View {
         case .reasoning(_, let part):
             ReasoningTile(part: part)
         case .tool(_, _, let part, let canDecide):
-            ToolCallRow(
-                part: part,
-                canDecide: canDecide,
-                session: session,
-                onOpen: { toolDetail = part }
-            )
+            if let reference = ThreadReference(part) {
+                AgentThreadBadge(reference: reference, teamId: session.teamId, agents: referencedAgents, onLink: open(link:))
+            } else {
+                ToolCallRow(
+                    part: part,
+                    canDecide: canDecide,
+                    session: session,
+                    onOpen: { toolDetail = part }
+                )
+            }
         case .toolRun(_, _, let items, let live):
             ToolRunView(items: items, live: live, session: session, onOpen: { toolDetail = $0 })
         case .work(_, let inner, let duration):
@@ -447,10 +480,7 @@ struct UserBubble: View {
                         Button(expanded ? "Show less" : "Show more") {
                             // Like a step disclosure: a reading interaction,
                             // applied in one layout rather than animated.
-                            readingInteraction()
-                            var transaction = Transaction(animation: nil)
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) { expanded.toggle() }
+                            disclose(readingInteraction) { expanded.toggle() }
                         }
                         .font(Theme.Text.label.weight(.medium))
                         .foregroundStyle(Theme.muted)
@@ -570,23 +600,28 @@ struct EventLine: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                readingInteraction()
-                var transaction = Transaction(animation: nil)
-                transaction.disablesAnimations = true
-                withTransaction(transaction) { expanded.toggle() }
+                disclose(readingInteraction) { expanded.toggle() }
             } label: {
-                HStack(spacing: 5) {
-                    if let logo = event.logo {
-                        BrandLogo(name: logo, size: 13).foregroundStyle(Theme.heading)
+                HStack(spacing: event.agentId == nil ? 5 : 8) {
+                    if let agentId = event.agentId {
+                        AgentAvatar(agentId: agentId, runtime: event.runtime)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(event.name).fontWeight(.medium).foregroundStyle(Theme.heading)
+                            Text(event.text.prefix { $0 != "\n" })
+                        }
                     } else {
-                        Text(event.name.prefix(1).uppercased())
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 14, height: 14)
-                            .background(Theme.muted, in: Circle())
+                        if let logo = event.logo {
+                            BrandLogo(name: logo, size: 13).foregroundStyle(Theme.heading)
+                        } else {
+                            Text(event.name.prefix(1).uppercased())
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 14, height: 14)
+                                .background(Theme.muted, in: Circle())
+                        }
+                        Text(event.name).fontWeight(.medium).foregroundStyle(Theme.heading).layoutPriority(1)
+                        Text(event.text.prefix { $0 != "\n" })
                     }
-                    Text(event.name).fontWeight(.medium).foregroundStyle(Theme.heading).layoutPriority(1)
-                    Text(event.text.prefix { $0 != "\n" })
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
@@ -630,13 +665,14 @@ struct MemoryRecallPill: View {
     let entries: [ChatRow.MemoryEntry]
     let fetched: Int
     @State private var expanded = false
+    @Environment(\.transcriptReadingInteraction) private var readingInteraction
 
     private var count: Int { max(entries.count, fetched) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) { expanded.toggle() }
+                disclose(readingInteraction) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "brain").font(Theme.Text.micro.weight(.semibold))
@@ -655,7 +691,7 @@ struct MemoryRecallPill: View {
             .buttonStyle(.plain)
             .disabled(entries.isEmpty)
 
-            Collapsible(expanded: expanded) {
+            if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(entries) { entry in
                         HStack(alignment: .top, spacing: 8) {
@@ -712,32 +748,126 @@ struct ResourceStrip: View {
     }
 }
 
-/// Queued messages waiting for the current reply to finish.
+/// This person's messages waiting in the session queue, in the order they
+/// run, as on Desktop: each can go into the running turn, come back to the
+/// composer to edit (tap), or be taken back.
 struct QueuedStrip: View {
-    let items: [String]
-    var onRemove: (Int) -> Void
+    struct Item: Identifiable, Equatable {
+        let id: String
+        let text: String
+        let steering: Bool
+    }
+    let items: [Item]
+    var canSteer = false
+    var onEdit: (String) -> Void
+    var onSteer: (String) -> Void
+    var onRemove: (String) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock").font(Theme.Text.micro)
-                        Text(item).lineLimit(1).font(Theme.Text.label)
-                        Button { onRemove(index) } label: {
-                            Image(systemName: "xmark").font(Theme.Text.micro.weight(.bold))
-                                .contentShape(Rectangle().inset(by: -10))
-                        }
-                        .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Queued messages · run after the turn ahead")
+                .font(Theme.Text.micro)
+                .foregroundStyle(Theme.muted)
+                .padding(.horizontal, 4)
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        row(item, number: index + 1)
                     }
-                    .foregroundStyle(Theme.body)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Theme.chatSurface, in: Capsule())
                 }
             }
-            .padding(.horizontal, 16)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: 136)
+            .fixedSize(horizontal: false, vertical: items.count <= 3)
         }
+        .padding(.horizontal, 16)
         .padding(.bottom, 6)
     }
+
+    private func row(_ item: Item, number: Int) -> some View {
+        HStack(spacing: 8) {
+            Button { onEdit(item.id) } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "text.badge.plus").font(Theme.Text.micro)
+                    Text("\(number)").font(Theme.Text.micro).monospacedDigit().foregroundStyle(Theme.muted)
+                    Text(item.text).lineLimit(1).font(Theme.Text.label)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Queued message \(number): \(item.text)")
+            .accessibilityHint("Edit in the composer")
+            if !item.id.hasPrefix("local.") {
+                Button { onSteer(item.id) } label: {
+                    Group {
+                        if item.steering { ProgressView().controlSize(.mini) }
+                        else { Image(systemName: "arrow.turn.down.right").font(Theme.Text.micro.weight(.bold)) }
+                    }
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSteer || item.steering)
+                .opacity(canSteer ? 1 : 0.35)
+                .accessibilityLabel("Send into the running turn")
+            }
+            Button { onRemove(item.id) } label: {
+                Image(systemName: "xmark").font(Theme.Text.micro.weight(.bold))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Take back")
+        }
+        .foregroundStyle(Theme.body)
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
+        .padding(.vertical, 4)
+        .background(Theme.chatSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
 }
+
+/// A teammate's computer that asks its owner first: the message waits for them, or they declined.
+struct ShareApprovalStrip: View {
+    let wait: ShareApprovalWait
+    let computer: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: wait == .pending ? "hourglass" : "nosign")
+                .font(Theme.Text.label)
+                .foregroundStyle(wait == .pending ? Theme.warning : Color.red)
+            Text(wait.message(computer: computer))
+                .font(Theme.Text.label)
+                .foregroundStyle(Theme.body)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.chatSurface, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 16)
+        .padding(.bottom, 6)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+#if os(iOS)
+/// Whether the system shows the navigation bar's buttons in a side rail (the
+/// vertical bar on iPhone Duo) instead of in the bar itself.
+private struct BarButtonsInSideRailKey: EnvironmentKey, UITraitBridgedEnvironmentKey {
+    static let defaultValue = false
+
+    static func read(from traits: UITraitCollection) -> Bool {
+        if #available(iOS 27.1, *) { return traits.verticalBarEdge != .unspecified }
+        return false
+    }
+
+    static func write(to traits: inout UIMutableTraits, value: Bool) {}
+}
+
+extension EnvironmentValues {
+    fileprivate var barButtonsInSideRail: Bool { self[BarButtonsInSideRailKey.self] }
+}
+#endif

@@ -4,12 +4,13 @@ import { AppError } from '@/lib/errors'
 
 import { OpenAbRpcError } from './openab-acp-errors'
 import {
-  catalogSessionConfig,
   controlSessionConfig,
-  offeredSessionConfig,
   restoreSessionConfigForWrite,
+  sessionConfigView,
+  shouldPrewarm,
 } from './session-config'
-import { parseSessionConfigOptions } from './session-config-options'
+import { catalogSessionConfig, offeredSessionConfig } from './session-config-catalog'
+import { parseSessionConfigOptions, pickOf, storedPick } from './session-config-options'
 
 const model = (currentValue = 'a') => ({
   id: 'model',
@@ -329,4 +330,79 @@ test('picks the runtime no longer offers are dropped, and a stale model is read 
     ['model', 'opus'],
     ['effort', 'high'],
   ])
+})
+
+test('the model list renders while a reply runs: catalog plus stored picks, never the session', async () => {
+  // A busy session answers config reads with -32005; the read path has no
+  // session client at all, only the runtime catalog and the stored picks.
+  const catalogFor = async () => ({
+    models: [
+      { id: 'sol', name: 'GPT-6.1-Sol' },
+      { id: 'astra', name: 'GPT-6-Astra' },
+    ],
+    controls: {
+      modelId: 'sol',
+      effort: [
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+      fast: false,
+      defaultEffort: 'low',
+    },
+  })
+  const state = await sessionConfigView({ model: 'astra', effort: 'high' }, catalogFor)
+
+  expect(state.status).toBe('ready')
+  expect(state.options.map((option) => [option.id, option.currentValue])).toEqual([
+    ['model', 'astra'],
+    ['effort', 'high'],
+  ])
+  expect(state.options[0]?.options.map((option) => option.value)).toEqual(['sol', 'astra'])
+  // An unreachable runtime reads as offline instead of failing.
+  expect(await sessionConfigView({}, () => Promise.reject(new Error('Runtime offline')))).toEqual({
+    status: 'offline',
+    options: [],
+  })
+})
+
+test('a confirmed change is read back by kind, so the chip and a recreated session keep it', async () => {
+  const set: unknown[] = []
+  const client = {
+    getSessionConfigOptions: async () => ({ configOptions: [model('a'), effort, fast] }),
+    setSessionConfigOption: async (_id: string, configId: string, value: string) => {
+      set.push([configId, value])
+
+      return { configOptions: [model(value), effort, fast] }
+    },
+  }
+  // The chip names controls by kind; the session gets its own id.
+  const state = await controlSessionConfig(client, 'session', { configId: 'model', value: 'b' })
+
+  expect(set).toEqual([['model', 'b']])
+  expect(pickOf(state.options)).toEqual({ model: 'b', effort: 'high', fast: 'off' })
+  await controlSessionConfig(client, 'session', { configId: 'effort', value: 'high' })
+  expect(set.at(-1)).toEqual(['reasoning_effort', 'high'])
+})
+
+test('a confirmed pick that differs from the start settings wins on the chip and on recreation', () => {
+  // Started on model a with fast on; later changed to b and high effort.
+  const confirmed = parseSessionConfigOptions([model('b'), effort])
+
+  expect(
+    storedPick({ runtimeDefaults: { model: 'a', fast: 'on' }, sessionConfig: confirmed }),
+  ).toEqual({ model: 'b', effort: 'high', fast: 'on' })
+  expect(storedPick({ runtimeDefaults: { model: 'a' } })).toEqual({ model: 'a' })
+  expect(storedPick()).toEqual({})
+})
+
+test('prewarms only the owner’s recently active conversations', () => {
+  const now = Date.parse('2026-10-29T12:00:00Z')
+  const recent = { userId: 'owner', lastActiveAt: new Date(now - 30 * 60 * 1000) }
+  const old = { userId: 'owner', lastActiveAt: new Date(now - 2 * 24 * 60 * 60 * 1000) }
+
+  expect(shouldPrewarm(recent, 'owner', now)).toBe(true)
+  expect(shouldPrewarm(old, 'owner', now)).toBe(false)
+  expect(shouldPrewarm(recent, 'viewer', now)).toBe(false)
+  // A legacy doc without lastActiveAt fails closed instead of throwing.
+  expect(shouldPrewarm({ userId: 'owner' } as typeof recent, 'owner', now)).toBe(false)
 })

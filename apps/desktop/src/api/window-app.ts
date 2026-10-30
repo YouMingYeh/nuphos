@@ -10,6 +10,8 @@ import type {
   LocalAgentSessionInfo,
   LocalSessionSource,
   LocalSkillImportResult,
+  LocalSetupResult,
+  LocalSetupStatus,
   LocalSkillInfo,
   PastedAttachmentPayload,
 } from './app-types.ts'
@@ -21,6 +23,7 @@ import type {
   TeamSkillObjectDetail,
 } from './plan-types.ts'
 import type { Diagram, DiagramSummary } from '../architecture/schema.ts'
+import type { Design, DesignOp, DesignPage, DesignSummary } from '../design/schema.ts'
 import type { DashboardViewRange } from '../dashboards/schema'
 import type { ConnectAgentLink } from '../lib/connectAgentLink.ts'
 import type {
@@ -30,6 +33,7 @@ import type {
   PersonalCredential,
   PersonalCredentialDeepLinkPayload,
   PersonalCredentialProvider,
+  SignInSession,
   UpdaterState,
   UserInfo,
 } from '../types/team.ts'
@@ -40,8 +44,15 @@ export type WindowAppApi = {
   atlasListPersonalCredentials(): Promise<PersonalCredential[]>
   atlasStartPersonalCredential(
     provider: PersonalCredentialProvider,
+    teamId?: string,
   ): Promise<{ authorizeUrl: string; state: string }>
-  atlasDeletePersonalCredential(provider: PersonalCredentialProvider): Promise<void>
+  atlasDeletePersonalCredential(
+    provider: PersonalCredentialProvider,
+    teamId?: string,
+  ): Promise<void>
+  atlasListSignInSessions(): Promise<SignInSession[]>
+  atlasSignOutSession(id: string): Promise<void>
+  atlasSignOutOtherSessions(): Promise<number>
   authUploadAvatar(image: Uint8Array): Promise<UserInfo>
   apiUrlSync(): string
   authRemoveAvatar(): Promise<UserInfo>
@@ -53,11 +64,16 @@ export type WindowAppApi = {
   authEmailVerifyCode(email: string, code: string): Promise<UserInfo>
   analyticsIdentify(userId: string, props?: Record<string, unknown>): Promise<void>
   analyticsSetTeam(teamId: string | null): Promise<void>
+  sendDiagnostics(): boolean
+  setSendDiagnostics(send: boolean): Promise<boolean>
+  onSendDiagnosticsChanged(listener: (send: boolean) => void): () => void
   appGetVersion(): Promise<string>
   appSetApiEndpoint(url: string | null): Promise<string>
   appGetPlatform(): Promise<string>
   appSelectAsciiInputSource(): Promise<void>
   appSetNativeTheme(source: 'system' | 'light' | 'dark'): Promise<void>
+  appGetAppIcon(): Promise<string>
+  appSetAppIcon(icon: string): Promise<void>
   onNativeThemeUpdated(cb: (payload: { shouldUseDarkColors: boolean }) => void): () => void
   getZoomFactor(): number
   notifyZoom(): void
@@ -99,6 +115,18 @@ export type WindowAppApi = {
     patch: { name?: string; nodes?: Diagram['nodes']; views?: Diagram['views'] },
   ): Promise<Diagram>
   archDeleteDiagram(teamId: string, diagramId: string): Promise<void>
+  designsList(teamId: string): Promise<DesignSummary[]>
+  designsStamp(teamId: string, designId: string): Promise<{ updatedAt: string }>
+  designsGet(teamId: string, designId: string): Promise<Design>
+  designsCreate(teamId: string, input: { name?: string; pages?: DesignPage[] }): Promise<Design>
+  designsReplace(
+    teamId: string,
+    designId: string,
+    /** Replacing `pages` needs the `updatedAt` last read; a mismatch is a 409. */
+    patch: { name?: string; pages?: DesignPage[]; updatedAt?: string },
+  ): Promise<Design>
+  designsApplyOps(teamId: string, designId: string, ops: DesignOp[]): Promise<Design>
+  designsDelete(teamId: string, designId: string): Promise<void>
   dashboardsList(teamId: string): Promise<import('../dashboards/schema').NuphosDashboard[]>
   dashboardsCreate(
     teamId: string,
@@ -174,6 +202,9 @@ export type WindowAppApi = {
     scope?: SkillScope,
   ): Promise<TeamSkillObject>
   teamSkillsListLocal(): Promise<LocalSkillInfo[]>
+  localSetupStatus(teamId: string): Promise<LocalSetupStatus>
+  localSetupSync(teamId: string): Promise<LocalSetupResult>
+  localSetupSetAutoSync(teamId: string, enabled: boolean): Promise<void>
   teamSkillsImportLocal(
     teamId: string,
     skillId: string,

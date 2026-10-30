@@ -9,6 +9,7 @@ import type {
 } from './app-types.ts'
 import type { SkillScope } from './plan-types.ts'
 import type { Diagram } from '../architecture/schema.ts'
+import type { DesignOp, DesignPage } from '../design/schema.ts'
 import type { DashboardViewRange } from '../dashboards/schema'
 import type { ConnectAgentLink } from '../lib/connectAgentLink.ts'
 import type {
@@ -22,10 +23,13 @@ export const appApi = {
   authUpdateProfile: (input: { name: string; username: string; avatarURL: string }) =>
     window.api.authUpdateProfile(input),
   atlasListPersonalCredentials: () => window.api.atlasListPersonalCredentials(),
-  atlasStartPersonalCredential: (provider: PersonalCredentialProvider) =>
-    window.api.atlasStartPersonalCredential(provider),
-  atlasDeletePersonalCredential: (provider: PersonalCredentialProvider) =>
-    window.api.atlasDeletePersonalCredential(provider),
+  atlasStartPersonalCredential: (provider: PersonalCredentialProvider, teamId?: string) =>
+    window.api.atlasStartPersonalCredential(provider, teamId),
+  atlasDeletePersonalCredential: (provider: PersonalCredentialProvider, teamId?: string) =>
+    window.api.atlasDeletePersonalCredential(provider, teamId),
+  atlasListSignInSessions: () => window.api.atlasListSignInSessions(),
+  atlasSignOutSession: (id: string) => window.api.atlasSignOutSession(id),
+  atlasSignOutOtherSessions: () => window.api.atlasSignOutOtherSessions(),
   authUploadAvatar: (image: Uint8Array) => window.api.authUploadAvatar(image),
   authRemoveAvatar: () => window.api.authRemoveAvatar(),
   authStatus: () => window.api.authStatus(),
@@ -37,11 +41,15 @@ export const appApi = {
   analyticsIdentify: (userId: string, props?: Record<string, unknown>) =>
     window.api.analyticsIdentify(userId, props),
   analyticsSetTeam: (teamId: string | null) => window.api.analyticsSetTeam(teamId),
+  sendDiagnostics: () => window.api.sendDiagnostics(),
+  setSendDiagnostics: (send: boolean) => window.api.setSendDiagnostics(send),
   appGetVersion: () => window.api.appGetVersion(),
   appSetApiEndpoint: (url: string | null) => window.api.appSetApiEndpoint(url),
   appGetPlatform: () => window.api.appGetPlatform(),
   appSelectAsciiInputSource: () => window.api.appSelectAsciiInputSource(),
   appSetNativeTheme: (source: 'system' | 'light' | 'dark') => window.api.appSetNativeTheme(source),
+  appGetAppIcon: () => window.api.appGetAppIcon(),
+  appSetAppIcon: (icon: string) => window.api.appSetAppIcon(icon),
   onNativeThemeUpdated: (cb: (payload: { shouldUseDarkColors: boolean }) => void) =>
     window.api.onNativeThemeUpdated?.(cb) ?? (() => {}),
   appHideWindow: () => window.api.appHideWindow(),
@@ -88,6 +96,20 @@ export const appApi = {
   ) => window.api.archSaveDiagram(teamId, diagramId, patch),
   archDeleteDiagram: (teamId: string, diagramId: string) =>
     window.api.archDeleteDiagram(teamId, diagramId),
+  designsList: (teamId: string) => window.api.designsList(teamId),
+  designsStamp: (teamId: string, designId: string) => window.api.designsStamp(teamId, designId),
+  designsGet: (teamId: string, designId: string) => window.api.designsGet(teamId, designId),
+  designsCreate: (teamId: string, input: { name?: string; pages?: DesignPage[] }) =>
+    window.api.designsCreate(teamId, input),
+  designsReplace: (
+    teamId: string,
+    designId: string,
+    /** Replacing `pages` needs the `updatedAt` last read; a mismatch is a 409. */
+    patch: { name?: string; pages?: DesignPage[]; updatedAt?: string },
+  ) => window.api.designsReplace(teamId, designId, patch),
+  designsApplyOps: (teamId: string, designId: string, ops: DesignOp[]) =>
+    window.api.designsApplyOps(teamId, designId, ops),
+  designsDelete: (teamId: string, designId: string) => window.api.designsDelete(teamId, designId),
   dashboardsList: (teamId: string) => window.api.dashboardsList(teamId),
   dashboardsCreate: (teamId: string, input: import('../dashboards/schema').CreateDashboardInput) =>
     window.api.dashboardsCreate(teamId, input),
@@ -151,6 +173,10 @@ export const appApi = {
     scope?: SkillScope,
   ) => window.api.teamSkillsPutObject(teamId, key, file, scope),
   teamSkillsListLocal: () => window.api.teamSkillsListLocal(),
+  localSetupStatus: (teamId: string) => window.api.localSetupStatus(teamId),
+  localSetupSync: (teamId: string) => window.api.localSetupSync(teamId),
+  localSetupSetAutoSync: (teamId: string, enabled: boolean) =>
+    window.api.localSetupSetAutoSync(teamId, enabled),
   teamSkillsImportLocal: (teamId: string, skillId: string, scope?: SkillScope) =>
     window.api.teamSkillsImportLocal(teamId, skillId, scope),
   teamSkillsDeleteObject: (teamId: string, key: string, scope?: SkillScope) =>

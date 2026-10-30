@@ -11,6 +11,7 @@ import { readAIConsent, saveAIConsent } from '@/lib/identity/ai-consent'
 import { MAX_AVATAR_UPLOAD_BYTES, removeAvatar, uploadAvatar } from '@/lib/identity/avatar-upload'
 import { signInWithPassword, setPasswordWithEmailCode } from '@/lib/identity/password'
 import { updateProfile } from '@/lib/identity/profile'
+import { startSession } from '@/lib/identity/start-session'
 import {
   abandonNativeSession,
   completeNativeSession,
@@ -19,17 +20,22 @@ import {
   redeemNativeSession,
   registerNativeSession,
 } from '@/lib/native-auth'
-import { clientIp } from '@/lib/request-origin'
+import { clientIp, signInSource } from '@/lib/request-origin'
 import { zv } from '@/lib/validate'
-import { requireAuth } from '@/middleware/auth'
+import * as authMiddleware from '@/middleware/auth' // per request: see auth.late-binding.test.ts
+import { authSessions } from '@/routes/auth-sessions'
 
 import { socialAuth } from './auth-social'
 
 import type { NativeDeliveryTarget } from '@/lib/native-auth'
 import type { AuthVariables } from '@/middleware/auth'
 
+const requireAuth: typeof authMiddleware.requireAuth = (c, n) => authMiddleware.requireAuth(c, n)
+
 export const auth = new Hono<{ Variables: AuthVariables }>()
 auth.route('/social', socialAuth)
+
+auth.route('/sessions', authSessions)
 
 auth.get('/me', requireAuth, (c) => {
   const cliToken = c.get('cliToken')
@@ -55,7 +61,7 @@ auth.patch('/me', requireAuth, async (c) =>
   c.json(await updateProfile(c.get('userId'), await c.req.json())),
 )
 
-const avatarBodyLimit = bodyLimit({
+export const avatarBodyLimit = bodyLimit({
   maxSize: MAX_AVATAR_UPLOAD_BYTES,
   onError: (c) =>
     c.json(
@@ -77,11 +83,13 @@ auth.put('/me/avatar', requireAuth, avatarBodyLimit, async (c) =>
 auth.delete('/me/avatar', requireAuth, async (c) => c.json(await removeAvatar(c.get('userId'))))
 
 auth.post('/password/sign-in', async (c) =>
-  c.json(await signInWithPassword(await c.req.json().catch(() => null))),
+  c.json(await startSession(c, await signInWithPassword(await c.req.json().catch(() => null)))),
 )
 
 auth.post('/password/set', async (c) =>
-  c.json(await setPasswordWithEmailCode(await c.req.json().catch(() => null))),
+  c.json(
+    await startSession(c, await setPasswordWithEmailCode(await c.req.json().catch(() => null))),
+  ),
 )
 
 // Email OTP sign-in/sign-up for teams not on Google Workspace. Errors follow
@@ -94,6 +102,7 @@ auth.post('/email/request-code', async (c) => {
   await requestEmailOtp(
     email,
     clientIp(c.req.header('CF-Connecting-IP'), c.req.header('X-Forwarded-For')),
+    signInSource((name) => c.req.header(name)),
   )
 
   return c.json({ ok: true })
@@ -106,9 +115,8 @@ auth.post('/email/verify-code', async (c) => {
   } | null
   const email = typeof body?.email === 'string' ? body.email : ''
   const code = typeof body?.code === 'string' ? body.code.trim() : ''
-  const { token, user } = await verifyEmailOtp(email, code)
 
-  return c.json({ token, user })
+  return c.json(await startSession(c, await verifyEmailOtp(email, code)))
 })
 
 // ── Native-app sign-in (RFC 8252). These endpoints are unauthenticated by
@@ -142,9 +150,9 @@ auth.post('/native/session/delivery', async (c) => {
 
 auth.post('/native/session/redeem', async (c) => {
   const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
-  const { token, user } = await redeemNativeSession(body?.handle, body?.codeVerifier, body?.code)
+  const user = await redeemNativeSession(body?.handle, body?.codeVerifier, body?.code)
 
-  return c.json({ token, user })
+  return c.json(await startSession(c, user))
 })
 
 // `nuphos agent --join`: a one-time token from the device's owner becomes a
@@ -194,8 +202,7 @@ auth.post('/google/sign-in', async (c) => {
     )
   }
 
-  // Resolved up front so both the success and the failure path below can send
-  // the browser back to the app.
+  // Resolved up front so the success and failure paths below can both return to the app.
   let delivery: NativeDeliveryTarget | null = null
 
   if (handle) {
@@ -218,11 +225,11 @@ auth.post('/google/sign-in', async (c) => {
   }
 
   try {
-    const { token, user } = await signInWithGoogleCode(code, redirectUri)
+    const user = await signInWithGoogleCode(code, redirectUri)
 
     if (handle && delivery) {
-      // The token is deliberately dropped here: the app mints a fresh one by
-      // redeeming, so neither the landing page nor the browser sees a credential.
+      // No session here: the app starts its own by redeeming, so neither the
+      // landing page nor the browser sees a credential.
       const completed = await completeNativeSession(handle, user.id)
 
       if (!completed) {
@@ -253,14 +260,8 @@ auth.post('/google/sign-in', async (c) => {
       })
     }
 
-    return c.json({
-      data: {
-        googleSignIn: {
-          token,
-          user,
-        },
-      },
-    })
+    // Without a handle, only the nuphos.ai website's server calls this.
+    return c.json({ data: { googleSignIn: await startSession(c, user, true) } })
   } catch (e) {
     if (handle) await abandonNativeSession(handle)
 
@@ -269,14 +270,17 @@ auth.post('/google/sign-in', async (c) => {
         errors: [
           {
             message: 'Failed to sign in',
-            extensions: { description: e instanceof Error ? e.message : String(e) },
+            extensions: {
+              description: e instanceof Error ? e.message : String(e),
+              ...(e instanceof AppError ? { code: e.code } : {}),
+            },
           },
         ],
         // Lets the landing page bounce the browser back to the app with the
         // failure, rather than leave it waiting on a listener nothing will hit.
         ...(delivery ? { nativeDelivery: delivery } : {}),
       },
-      400,
+      e instanceof AppError && e.status === 403 ? 403 : 400,
     )
   }
 })

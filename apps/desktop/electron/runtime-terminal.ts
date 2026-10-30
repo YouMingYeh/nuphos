@@ -1,8 +1,8 @@
 import { StringDecoder } from 'node:string_decoder'
 
-import { apiUrl } from './api-endpoint.ts'
-import { readToken } from './atlas/client.ts'
+import { signedIn, stillCurrent } from './account-request.ts'
 import { authSession } from './auth-session.ts'
+import { onPageGone } from './page-owner.ts'
 
 import type { LocalTerminalEvent, TerminalTarget } from '../src/api/local-terminal-types.ts'
 import type { WebContents } from 'electron'
@@ -18,13 +18,13 @@ type Session = {
   label: string
   ready: Promise<{ id: string; shell: string }>
   closed: boolean
+  release: () => void
   resizeTimer?: ReturnType<typeof setTimeout>
 }
 
 /** The main process, not a mounted view, owns the connection and bounded scrollback. */
 export class RuntimeTerminalSessions {
   private readonly sessions = new Map<string, Session>()
-  private readonly owners = new WeakSet<WebContents>()
   private get(owner: WebContents, id: string) {
     const session = this.sessions.get(id)
 
@@ -49,38 +49,28 @@ export class RuntimeTerminalSessions {
       label: 'Runtime',
       closed: false,
       ready: Promise.resolve({ id, shell: 'Runtime' }),
+      release: onPageGone(owner, () => this.close(owner, id)),
     }
 
     this.sessions.set(id, session)
-    if (!this.owners.has(owner)) {
-      this.owners.add(owner)
-      const closeOwner = () => {
-        for (const [key, value] of this.sessions) if (value.owner === owner) this.close(owner, key)
-      }
-
-      owner.once('destroyed', closeOwner)
-      owner.on('render-process-gone', closeOwner)
-      owner.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
-        if (isMainFrame && !isInPlace) closeOwner()
-      })
-    }
     session.ready = this.connect(session, id, cols, rows)
 
     return session.ready
   }
   private async connect(session: Session, id: string, cols: number, rows: number) {
-    const token = await readToken()
+    const account = await signedIn().catch(() => null)
 
-    if (!token || session.closed) throw new Error('Terminal closed or signed out')
+    if (!account || session.closed) throw new Error('Terminal closed or signed out')
+    stillCurrent(account)
     const url = new URL(
       `/teams/${encodeURIComponent(session.target.teamId)}/runtime-terminal/${encodeURIComponent(session.target.sessionId)}`,
-      apiUrl(),
+      account.api,
     )
 
     url.searchParams.set('cols', String(cols))
     url.searchParams.set('rows', String(rows))
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } })
+    const socket = new WebSocket(url, { headers: { authorization: `Bearer ${account.token}` } })
 
     session.socket = socket
     const decoder = new StringDecoder('utf8')
@@ -179,6 +169,7 @@ export class RuntimeTerminalSessions {
     session.closed = true
     clearTimeout(session.resizeTimer)
     this.sessions.delete(id)
+    session.release()
     session.socket?.close()
   }
   closeAll() {

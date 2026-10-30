@@ -9,10 +9,10 @@ import { useGithubHttp } from '@/lib/test/doubles/github-http'
 import { useIdentity } from '@/lib/test/doubles/identity'
 
 import { authorizedResourceTurn } from './resource-webhook'
+import { resourceCredentialAllowed } from './session-resource-lookup'
 import {
   bindSessionResource,
   resourceConversation,
-  resourceCredentialAllowed,
   sessionResourceInput,
   unlinkSessionResource,
 } from './session-resources'
@@ -37,6 +37,7 @@ let membership = true
 let connected = true
 let updates: unknown[] = []
 let lookupCount = 0
+let merged = false
 
 useIdentity({ getTeamMembership: async () => (membership ? { role: 'MEMBER' } : null) })
 useByosAccount({
@@ -59,11 +60,19 @@ useGithubHttp({
     if (url.includes('/access_tokens'))
       return Response.json({ token: 'test-token', expires_at: '2099-01-01T00:00:00Z' })
 
+    if (url.includes('/check-runs'))
+      return Response.json({ check_runs: [{ conclusion: 'success' }, { conclusion: 'failure' }] })
+    if (url.endsWith('/status')) return Response.json({ state: 'success', total_count: 1 })
+    if (url.includes('/reviews')) return Response.json([])
+
     return Response.json({
       number: 56,
       title: 'Verified PR',
-      state: 'open',
-      merged: false,
+      state: merged ? 'closed' : 'open',
+      merged,
+      merged_at: merged ? '2026-10-29T03:12:00Z' : null,
+      mergeable_state: 'clean',
+      head: { sha: 'a'.repeat(40) },
       base: { repo: { id: 34, full_name: 'org/repo' } },
     })
   },
@@ -71,6 +80,7 @@ useGithubHttp({
 beforeEach(() => {
   invalidateInstallationToken(12)
   lookupCount = 0
+  merged = false
   membership = true
   connected = true
   updates = []
@@ -105,10 +115,11 @@ test('reply-only participants cannot enable autonomous wakeups', async () => {
   conversation.managerIds = ['participant']
   expect(await resourceConversation({ ...actor, userId: 'participant' }, true)).toBe(conversation)
 })
-test('worker rechecks archive, unlink, membership, selection and disconnected integrations', async () => {
+test('worker rechecks unlink, membership, selection and disconnected integrations', async () => {
   expect(await authorizedResourceTurn(delivery)).not.toBeNull()
+  // An archived conversation still wakes; its turn restores it.
   conversation.archivedAt = new Date()
-  expect(await authorizedResourceTurn(delivery)).toBeNull()
+  expect(await authorizedResourceTurn(delivery)).not.toBeNull()
   delete conversation.archivedAt
   conversation.linkedResources = []
   expect(await authorizedResourceTurn(delivery)).toBeNull()
@@ -173,20 +184,65 @@ test('binding resolves provider-owned identity instead of trusting a caller titl
     key: 'github/12/34/56',
     title: 'Verified PR',
     url: 'https://github.com/org/repo/pull/56',
+    // A failed check run on the head commit: the tag starts red.
+    health: 'checks_failed',
   })
   expect(updates).toHaveLength(1)
-  expect(lookupCount).toBe(2)
+  // The token and the PR, then its check runs, status and reviews (the PR is not fetched twice).
+  expect(lookupCount).toBe(5)
 })
-test('linking the same verified resource is idempotent', async () => {
-  expect(
-    await bindSessionResource(actor, {
-      provider: 'github',
-      installationId: 12,
-      repository: 'org/repo',
-      number: 56,
-    }),
-  ).toBe(resource)
-  expect(updates).toHaveLength(0)
+test('linking an already linked resource refreshes it in place', async () => {
+  const linked = await bindSessionResource(actor, {
+    provider: 'github',
+    installationId: 12,
+    repository: 'org/repo',
+    number: 56,
+  })
+
+  expect(linked).toMatchObject({
+    id: resource.id,
+    key: resource.key,
+    linkedAt: resource.linkedAt,
+    title: 'Verified PR',
+    state: 'open',
+    health: 'checks_failed',
+  })
+  // One positional update of the existing entry, never a second push.
+  expect(updates).toEqual([
+    [
+      { sessionId: 'session', 'linkedResources.id': resource.id },
+      {
+        $set: {
+          'linkedResources.$.title': 'Verified PR',
+          'linkedResources.$.state': 'open',
+          'linkedResources.$.url': 'https://github.com/org/repo/pull/56',
+          'linkedResources.$.health': 'checks_failed',
+        },
+      },
+    ],
+  ])
+})
+test('linking again records a merge that no webhook delivered', async () => {
+  merged = true
+  const linked = await bindSessionResource(actor, {
+    provider: 'github',
+    installationId: 12,
+    repository: 'org/repo',
+    number: 56,
+  })
+
+  expect(linked.state).toBe('merged')
+  expect(linked.mergedAt).toBe('2026-10-29T03:12:00Z')
+  expect(updates).toHaveLength(1)
+  expect(updates[0]).toMatchObject([
+    {},
+    {
+      $set: {
+        'linkedResources.$.state': 'merged',
+        'linkedResources.$.mergedAt': '2026-10-29T03:12:00Z',
+      },
+    },
+  ])
 })
 test('unselected installations are rejected before contacting GitHub', async () => {
   await expect(

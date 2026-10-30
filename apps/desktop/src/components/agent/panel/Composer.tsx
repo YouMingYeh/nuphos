@@ -122,6 +122,7 @@ export function Composer({
     readOnlyPlaceholder,
     streaming,
     autoFocus,
+    focusKey: draftKey,
     promptSuggestion,
   })
 
@@ -134,13 +135,13 @@ export function Composer({
     modelSession && modelControl.data?.status !== 'unsupported'
       ? () => modelControl.setOpen(true)
       : undefined,
-    runtimeState?.commands,
+    { commands: runtimeState?.commands, runtimeId: runtimeControl?.value?.id },
   )
   const actions = useComposerActions(state, {
     sendBlocked,
     readOnly,
     streaming,
-    onSend: mentions.wrapSend(onSend),
+    onSend: mentions.wrapSend(slash.wrapSend(modelControl.wrapSend(onSend))),
     pendingSeed,
     onSeedConsumed,
     dropRegisterRef,
