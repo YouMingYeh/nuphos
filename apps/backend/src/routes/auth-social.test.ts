@@ -70,19 +70,39 @@ useDb({
 })
 beforeEach(() => {
   docs.clear()
+  config.auth.apple.clientId = undefined
   config.auth.google.clientId = 'test-client'
   config.auth.google.clientSecret = 'test-secret'
 })
-test('provider chooser offers Google and Apple without reflecting arbitrary handles', async () => {
+test('provider chooser offers only configured providers without reflecting arbitrary handles', async () => {
   const response = await app.request('/login')
 
   expect(response.status).toBe(200)
+  expect(response.headers.get('x-nuphos-social-login')).toBe('1')
   const html = await response.text()
 
   expect(html).toContain('Continue with Google')
-  expect(html).toContain('Continue with Apple')
+  expect(html).not.toContain('Continue with Apple')
   expect(response.headers.get('cache-control')).toBe('no-store')
   expect((await app.request('/login?handle=%3Cscript%3E')).status).toBe(400)
+
+  Object.assign(config.auth.apple, {
+    clientId: 'test-apple',
+    teamId: 'TEAM',
+    keyId: 'KEY',
+    privateKey: generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({
+      format: 'pem',
+      type: 'pkcs8',
+    }),
+  })
+  expect(await (await app.request('/login')).text()).toContain('Continue with Apple')
+})
+test('chooser is unavailable until a provider is configured', async () => {
+  config.auth.google.clientId = undefined
+  const response = await app.request('/login')
+
+  expect(response.status).toBe(503)
+  expect(response.headers.get('x-nuphos-social-login')).toBeNull()
 })
 test('browser correlation cookie is required; cancellation consumes state once', async () => {
   const start = await app.request('/google/start')
